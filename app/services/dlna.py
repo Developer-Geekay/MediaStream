@@ -14,7 +14,7 @@ import uuid
 import logging
 from pathlib import Path, PurePosixPath
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import unquote
+from urllib.parse import unquote, quote
 from xml.etree.ElementTree import Element, SubElement, tostring
 
 from app.config import settings
@@ -117,8 +117,13 @@ def _browse_response_xml(local_ip: str, http_port: int, media_root: Path) -> str
             SubElement(el, "upnp:class").text = "object.item.audioItem.musicTrack"
         else:
             SubElement(el, "upnp:class").text = "object.item.imageItem.photo"
-        url = f"http://{local_ip}:{http_port}/dlna/media/{item['rel_url']}"
-        res = SubElement(el, "res", protocolInfo=f"http-get:*:{mime}:*", size=str(item["size"]))
+        # URL-encode path so spaces/special chars in filenames are valid URLs.
+        # DLNA.ORG_OP=01 advertises byte-range (seek) support; without it many
+        # renderers refuse to play or disable seeking entirely.
+        encoded_path = quote(item["rel_url"], safe="/")
+        url = f"http://{local_ip}:{http_port}/dlna/media/{encoded_path}"
+        proto = f"http-get:*:{mime}:DLNA.ORG_OP=01;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+        res = SubElement(el, "res", protocolInfo=proto, size=str(item["size"]))
         res.text = url
 
     return tostring(didl, encoding="unicode")
@@ -141,9 +146,13 @@ class DLNAHTTPHandler(BaseHTTPRequestHandler):
 
         elif path.startswith("/dlna/media/"):
             rel = path[len("/dlna/media/"):]
-            # On Windows, convert forward slashes to OS separator for file lookup
-            file_path = self.media_root / Path(rel)
+            file_path = (self.media_root / Path(rel)).resolve()
+            # Prevent path traversal outside media root
+            if not str(file_path).startswith(str(self.media_root)):
+                self._respond(403, "text/plain", b"Forbidden")
+                return
             if not file_path.exists() or not file_path.is_file():
+                logger.warning("DLNA: file not found: %s", file_path)
                 self._respond(404, "text/plain", b"Not found")
                 return
             mime = MIME_MAP.get(file_path.suffix.lower(), "application/octet-stream")

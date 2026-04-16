@@ -1,3 +1,4 @@
+import binascii
 from datetime import datetime, timedelta
 from typing import Optional
 from jose import JWTError, jwt
@@ -13,6 +14,21 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 
 ALGORITHM = "HS256"
+
+
+def compute_nt_hash(password: str) -> str:
+    """Compute NTLM NT hash from a plain-text password (needed for SMB auth)."""
+    try:
+        from impacket import ntlm
+        return binascii.hexlify(ntlm.compute_nthash(password)).decode()
+    except Exception:
+        # Fallback: raw MD4 via hashlib (may be unavailable on some OpenSSL builds)
+        import hashlib
+        try:
+            h = hashlib.new("md4", password.encode("utf-16-le"))
+            return h.hexdigest()
+        except ValueError:
+            return ""
 
 
 class Token(BaseModel):

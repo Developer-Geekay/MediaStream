@@ -34,14 +34,20 @@ ftp:
 
 smb:
   enabled: true
+  host: "0.0.0.0"
+  # Port 4450 avoids conflicts with the OS built-in SMB (445).
+  # Windows: Map Network Drive using \\<ip>:4450\MEDIAFILES
+  # macOS:   Finder → Go → Connect to Server → smb://<ip>:4450/MEDIAFILES
+  # Linux:   smbclient //<ip>/MEDIAFILES -p 4450 -U <user>
+  port: 4450
   workgroup: "MEDIASTREAM"
-  server_string: "MediaStream Server"
-  share_name: "MediaFiles"
-  config_path: "/etc/samba/smb.conf"
+  share_name: "MEDIAFILES"
 
 dlna:
   enabled: true
-  server_name: "MediaStream DLNA"
-  port: 1900
-  http_port: 8200
   friendly_name: "MediaStream"
+  http_port: 8200
+  # SSDP discovery uses UDP multicast on 239.255.255.250:1900
+  # Binding port 1900 may require elevated privileges on Linux/macOS.
+  # If it fails the HTTP server still works; add the description URL manually.
+  ssdp_port: 1900

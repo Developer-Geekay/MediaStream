@@ -98,7 +98,7 @@ function switchTab(name) {
   if (name === 'dashboard') loadDashboard();
   if (name === 'media') loadMedia('');
   if (name === 'users') loadUsers();
-  if (name === 'shares') loadSmbConfig();
+  if (name === 'connections') loadConnections();
 }
 
 // ---- Dashboard ----
@@ -123,15 +123,15 @@ async function loadDashboard() {
 function renderServiceCard(name, info) {
   const badge = document.getElementById(`${name}-badge`);
   const detail = document.getElementById(`${name}-detail`);
-  const running = info.running || info.installed && info.running;
+  const running = !!info.running;
   badge.textContent = running ? 'ON' : 'OFF';
   badge.className = `badge ${running ? 'badge-on' : 'badge-off'}`;
   if (name === 'ftp') {
-    detail.textContent = `${info.host || ''}:${info.port || ''} | TLS: ${info.tls ? 'yes' : 'no'}`;
+    detail.textContent = `Port ${info.port || ''} | TLS: ${info.tls ? 'yes' : 'no'}`;
   } else if (name === 'smb') {
-    detail.textContent = `Workgroup: ${info.workgroup} | Share: ${info.share_name} | Samba: ${info.installed ? 'installed' : 'not installed'}`;
+    detail.textContent = `Port ${info.port || ''} | Share: ${info.share_name || ''}`;
   } else if (name === 'dlna') {
-    detail.textContent = `${info.friendly_name} | ${info.description_url || ''}`;
+    detail.textContent = `${info.friendly_name || ''} | Port ${info.http_port || ''}`;
   }
 }
 
@@ -151,11 +151,10 @@ async function stopService(name) {
   } catch (e) { toast(e.message, 'error'); }
 }
 
-async function applySmb() {
+async function reloadSmb() {
   try {
-    const res = await api('POST', '/shares/smb/apply');
-    if (res.success) toast('Samba config applied', 'success');
-    else toast(res.error || 'Failed', 'error');
+    const res = await api('POST', '/shares/smb/reload');
+    toast(res.success !== false ? 'SMB users reloaded' : (res.error || 'Failed'), res.success !== false ? 'success' : 'error');
     loadDashboard();
   } catch (e) { toast(e.message, 'error'); }
 }
@@ -334,12 +333,44 @@ async function removeUser(username) {
   } catch (e) { toast(e.message, 'error'); }
 }
 
-// ---- Shares ----
-async function loadSmbConfig() {
+// ---- Connections ----
+async function loadConnections() {
+  const container = document.getElementById('connection-cards');
+  container.innerHTML = '<p style="color:var(--text-muted)">Loading...</p>';
   try {
-    const res = await api('GET', '/shares/smb/config');
-    document.getElementById('smb-config-preview').textContent = res.config || '';
-  } catch (e) { document.getElementById('smb-config-preview').textContent = e.message; }
+    const status = await api('GET', '/shares/status');
+    container.innerHTML = '';
+    const services = [
+      {
+        name: 'FTP (FTPS)', key: 'ftp', icon: '📂',
+        hint: status.ftp.connect_hint || `ftp://<server>:${status.ftp.port}`,
+        detail: `Port ${status.ftp.port} | TLS: ${status.ftp.tls ? 'enabled' : 'disabled'}`,
+      },
+      {
+        name: 'SMB (Pure Python)', key: 'smb', icon: '💾',
+        hint: status.smb.connect_hint || '',
+        detail: `Port ${status.smb.port} | Share: ${status.smb.share_name}`,
+      },
+      {
+        name: 'DLNA / UPnP', key: 'dlna', icon: '📺',
+        hint: status.dlna.connect_hint || '',
+        detail: `Port ${status.dlna.http_port} | ${status.dlna.description_url || ''}`,
+      },
+    ];
+    services.forEach(svc => {
+      const running = !!status[svc.key].running;
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML = `
+        <div class="service-header">
+          <h3>${svc.icon} ${esc(svc.name)}</h3>
+          <span class="badge ${running ? 'badge-on' : 'badge-off'}">${running ? 'ON' : 'OFF'}</span>
+        </div>
+        <p class="service-detail">${esc(svc.detail)}</p>
+        <pre class="code-block" style="font-size:11px;max-height:80px">${esc(svc.hint)}</pre>`;
+      container.appendChild(card);
+    });
+  } catch (e) { container.innerHTML = `<p style="color:var(--danger)">${e.message}</p>`; }
 }
 
 // ---- Utils ----

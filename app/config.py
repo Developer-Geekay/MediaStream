@@ -2,7 +2,6 @@ import yaml
 import os
 from pathlib import Path
 from pydantic_settings import BaseSettings
-from pydantic import Field
 
 
 CONFIG_PATH = Path(os.getenv("CONFIG_PATH", "./config/config.yaml"))
@@ -38,16 +37,15 @@ class Settings(BaseSettings):
     ftp_max_per_ip: int = _cfg.get("ftp", {}).get("max_connections_per_ip", 5)
 
     smb_enabled: bool = _cfg.get("smb", {}).get("enabled", True)
+    smb_host: str = _cfg.get("smb", {}).get("host", "0.0.0.0")
+    smb_port: int = _cfg.get("smb", {}).get("port", 4450)
     smb_workgroup: str = _cfg.get("smb", {}).get("workgroup", "MEDIASTREAM")
-    smb_server_string: str = _cfg.get("smb", {}).get("server_string", "MediaStream Server")
-    smb_share_name: str = _cfg.get("smb", {}).get("share_name", "MediaFiles")
-    smb_config_path: str = _cfg.get("smb", {}).get("config_path", "/etc/samba/smb.conf")
+    smb_share_name: str = _cfg.get("smb", {}).get("share_name", "MEDIAFILES")
 
     dlna_enabled: bool = _cfg.get("dlna", {}).get("enabled", True)
-    dlna_server_name: str = _cfg.get("dlna", {}).get("server_name", "MediaStream DLNA")
-    dlna_port: int = _cfg.get("dlna", {}).get("port", 1900)
-    dlna_http_port: int = _cfg.get("dlna", {}).get("http_port", 8200)
     dlna_friendly_name: str = _cfg.get("dlna", {}).get("friendly_name", "MediaStream")
+    dlna_http_port: int = _cfg.get("dlna", {}).get("http_port", 8200)
+    dlna_ssdp_port: int = _cfg.get("dlna", {}).get("ssdp_port", 1900)
 
     class Config:
         env_prefix = "MEDIASTREAM_"

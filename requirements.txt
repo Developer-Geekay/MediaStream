@@ -11,4 +11,5 @@ PyYAML==6.0.1
 python-dotenv==1.0.1
 Jinja2==3.1.4
 watchdog==4.0.0
-netifaces==0.11.0
+cryptography==42.0.8
+impacket==0.12.0

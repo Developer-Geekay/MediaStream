@@ -2,9 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 from typing import Optional
 
-from app.auth import require_admin, hash_password, get_current_user
+from app.auth import require_admin, hash_password, compute_nt_hash, get_current_user
 from app.models import create_user, delete_user, list_users, update_user, get_user, User
-from app.services import smb as smb_service
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -68,8 +67,18 @@ async def get_users(_: User = Depends(require_admin)):
 @router.post("/")
 async def add_user(req: CreateUserRequest, _: User = Depends(require_admin)):
     try:
-        user = create_user(req.username, hash_password(req.password), req.role)
-        update_user(req.username, ftp_access=req.ftp_access, smb_access=req.smb_access, dlna_access=req.dlna_access)
+        user = create_user(
+            req.username,
+            hash_password(req.password),
+            nt_hash=compute_nt_hash(req.password),
+            role=req.role,
+        )
+        update_user(
+            req.username,
+            ftp_access=req.ftp_access,
+            smb_access=req.smb_access,
+            dlna_access=req.dlna_access,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"message": f"User '{req.username}' created", "username": req.username}
@@ -84,6 +93,7 @@ async def update_user_endpoint(username: str, req: UpdateUserRequest, admin: Use
         if len(req.password) < 8:
             raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
         updates["hashed_password"] = hash_password(req.password)
+        updates["nt_hash"] = compute_nt_hash(req.password)
     update_user(username, **updates)
     return {"message": f"User '{username}' updated"}
 
@@ -94,5 +104,4 @@ async def remove_user(username: str, admin: User = Depends(require_admin)):
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
     if not delete_user(username):
         raise HTTPException(status_code=404, detail="User not found")
-    smb_service.remove_smb_user(username)
     return {"message": f"User '{username}' deleted"}

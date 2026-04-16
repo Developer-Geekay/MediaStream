@@ -1,16 +1,16 @@
 """
-DLNA/UPnP service — pure-Python implementation.
-Broadcasts via SSDP and serves a basic MediaServer device description + content directory.
-Compatible with VLC, Kodi, Smart TVs, and other DLNA renderers.
+DLNA/UPnP service — pure-Python, cross-platform (Linux, macOS, Windows).
+Broadcasts via SSDP and serves a MediaServer device description + content directory.
+Compatible with VLC, Kodi, Smart TVs, and any UPnP/DLNA renderer.
 """
+import os
+import platform
 import socket
 import struct
 import threading
 import uuid
 import logging
-import mimetypes
-import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import unquote
 from xml.etree.ElementTree import Element, SubElement, tostring
@@ -21,7 +21,6 @@ logger = logging.getLogger("mediastream.dlna")
 
 DEVICE_UUID = str(uuid.uuid5(uuid.NAMESPACE_DNS, "mediastream.local"))
 SSDP_ADDR = "239.255.255.250"
-SSDP_PORT = 1900
 
 MIME_MAP = {
     ".mp4": "video/mp4",
@@ -37,6 +36,8 @@ MIME_MAP = {
     ".png": "image/png",
     ".gif": "image/gif",
 }
+
+_IS_WINDOWS = platform.system() == "Windows"
 
 
 def _get_local_ip() -> str:
@@ -79,14 +80,16 @@ def _device_description_xml(local_ip: str, http_port: int) -> str:
 
 def _list_media_items(media_root: Path) -> list[dict]:
     items = []
-    allowed = set(MIME_MAP.keys())
     for f in sorted(media_root.rglob("*")):
-        if f.is_file() and f.suffix.lower() in allowed:
+        if f.is_file() and f.suffix.lower() in MIME_MAP:
+            # Always use forward slashes in URL paths regardless of OS
+            rel_posix = PurePosixPath(*f.relative_to(media_root).parts)
             items.append({
-                "id": str(hash(str(f))),
+                "id": str(abs(hash(str(f)))),
                 "path": f,
+                "rel_url": str(rel_posix),
                 "name": f.name,
-                "mime": MIME_MAP.get(f.suffix.lower(), "application/octet-stream"),
+                "mime": MIME_MAP[f.suffix.lower()],
                 "size": f.stat().st_size,
             })
     return items
@@ -112,8 +115,7 @@ def _browse_response_xml(local_ip: str, http_port: int, media_root: Path) -> str
             SubElement(el, "upnp:class").text = "object.item.audioItem.musicTrack"
         else:
             SubElement(el, "upnp:class").text = "object.item.imageItem.photo"
-        rel_path = item["path"].relative_to(media_root)
-        url = f"http://{local_ip}:{http_port}/dlna/media/{rel_path}"
+        url = f"http://{local_ip}:{http_port}/dlna/media/{item['rel_url']}"
         res = SubElement(el, "res", protocolInfo=f"http-get:*:{mime}:*", size=str(item["size"]))
         res.text = url
 
@@ -126,7 +128,7 @@ class DLNAHTTPHandler(BaseHTTPRequestHandler):
     http_port: int = 8200
 
     def log_message(self, format, *args):
-        logger.debug("DLNA HTTP: " + format, *args)
+        logger.debug("DLNA HTTP " + format, *args)
 
     def do_GET(self):
         path = unquote(self.path)
@@ -137,11 +139,11 @@ class DLNAHTTPHandler(BaseHTTPRequestHandler):
 
         elif path.startswith("/dlna/media/"):
             rel = path[len("/dlna/media/"):]
-            file_path = self.media_root / rel
+            # On Windows, convert forward slashes to OS separator for file lookup
+            file_path = self.media_root / Path(rel)
             if not file_path.exists() or not file_path.is_file():
                 self._respond(404, "text/plain", b"Not found")
                 return
-            # Range support for streaming
             mime = MIME_MAP.get(file_path.suffix.lower(), "application/octet-stream")
             file_size = file_path.stat().st_size
             range_header = self.headers.get("Range")
@@ -169,11 +171,9 @@ class DLNAHTTPHandler(BaseHTTPRequestHandler):
             self._respond(404, "text/plain", b"Not found")
 
     def do_POST(self):
-        path = unquote(self.path)
-        if path == "/dlna/control":
+        if unquote(self.path) == "/dlna/control":
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length).decode("utf-8", errors="replace")
-            # Handle BrowseDirectChildren SOAP action
             if "Browse" in body:
                 didl = _browse_response_xml(self.local_ip, self.http_port, self.media_root)
                 count = len(_list_media_items(self.media_root))
@@ -211,25 +211,53 @@ class DLNAHTTPHandler(BaseHTTPRequestHandler):
 
 
 class SSDPServer(threading.Thread):
-    def __init__(self, local_ip: str, http_port: int):
+    """
+    Listens for UPnP M-SEARCH requests and replies with our device location.
+    Cross-platform: handles Windows socket quirks (no SO_REUSEPORT, different multicast join).
+    """
+
+    def __init__(self, local_ip: str, http_port: int, ssdp_port: int):
         super().__init__(daemon=True, name="ssdp-server")
         self.local_ip = local_ip
         self.http_port = http_port
+        self.ssdp_port = ssdp_port
         self._stop_event = threading.Event()
         self._sock: socket.socket | None = None
 
     def run(self):
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            self._sock.bind(("", SSDP_PORT))
+            self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # SO_REUSEPORT is not available on Windows
+            if hasattr(socket, "SO_REUSEPORT"):
+                try:
+                    self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                except (AttributeError, OSError):
+                    pass
+            self._sock.bind(("", self.ssdp_port))
         except OSError as e:
-            logger.warning("Cannot bind SSDP port %d: %s (need root or cap_net_bind_service)", SSDP_PORT, e)
+            logger.warning(
+                "Cannot bind SSDP port %d: %s  "
+                "(on Linux/macOS run as root; on Windows run as Administrator, "
+                "or disable 'Function Discovery' service to free the port)",
+                self.ssdp_port, e,
+            )
             return
-        mreq = struct.pack("4sL", socket.inet_aton(SSDP_ADDR), socket.INADDR_ANY)
-        self._sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+
+        # Join the UPnP multicast group
+        try:
+            mreq = struct.pack("4s4s",
+                socket.inet_aton(SSDP_ADDR),
+                socket.inet_aton(self.local_ip),
+            )
+            self._sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        except OSError:
+            # Fallback: join on INADDR_ANY
+            mreq = struct.pack("4sL", socket.inet_aton(SSDP_ADDR), socket.INADDR_ANY)
+            self._sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+
         self._sock.settimeout(1.0)
-        logger.info("SSDP server listening on %s:%d", SSDP_ADDR, SSDP_PORT)
+        logger.info("SSDP discovery listening on %s:%d", SSDP_ADDR, self.ssdp_port)
 
         while not self._stop_event.is_set():
             try:
@@ -239,6 +267,7 @@ class SSDPServer(threading.Thread):
                     "ssdp:all" in msg
                     or "MediaServer" in msg
                     or "ContentDirectory" in msg
+                    or "upnp:rootdevice" in msg
                 ):
                     self._send_response(addr)
             except socket.timeout:
@@ -247,11 +276,12 @@ class SSDPServer(threading.Thread):
                 logger.debug("SSDP recv error: %s", e)
 
     def _send_response(self, addr):
+        from email.utils import formatdate
         location = f"http://{self.local_ip}:{self.http_port}/dlna/description.xml"
         response = (
             "HTTP/1.1 200 OK\r\n"
             "CACHE-CONTROL: max-age=1800\r\n"
-            f"DATE: {self._http_date()}\r\n"
+            f"DATE: {formatdate(usegmt=True)}\r\n"
             f"LOCATION: {location}\r\n"
             "SERVER: MediaStream/1.0 UPnP/1.0\r\n"
             "ST: urn:schemas-upnp-org:device:MediaServer:1\r\n"
@@ -260,7 +290,6 @@ class SSDPServer(threading.Thread):
         )
         try:
             self._sock.sendto(response.encode(), addr)
-            logger.debug("SSDP response sent to %s", addr)
         except Exception as e:
             logger.debug("SSDP send error: %s", e)
 
@@ -271,11 +300,6 @@ class SSDPServer(threading.Thread):
                 self._sock.close()
             except Exception:
                 pass
-
-    @staticmethod
-    def _http_date() -> str:
-        from email.utils import formatdate
-        return formatdate(usegmt=True)
 
 
 _http_server: HTTPServer | None = None
@@ -289,7 +313,6 @@ def start_dlna_server() -> None:
     http_port = settings.dlna_http_port
     media_root = Path(settings.media_root).resolve()
 
-    # Configure handler class attributes (thread-safe for single-server use)
     DLNAHTTPHandler.media_root = media_root
     DLNAHTTPHandler.local_ip = local_ip
     DLNAHTTPHandler.http_port = http_port
@@ -297,13 +320,16 @@ def start_dlna_server() -> None:
     _http_server = HTTPServer(("0.0.0.0", http_port), DLNAHTTPHandler)
 
     def _run_http():
-        logger.info("DLNA HTTP server on %s:%d", local_ip, http_port)
+        logger.info(
+            "DLNA HTTP server on %s:%d  description: http://%s:%d/dlna/description.xml",
+            local_ip, http_port, local_ip, http_port,
+        )
         _http_server.serve_forever()
 
     _http_thread = threading.Thread(target=_run_http, daemon=True, name="dlna-http")
     _http_thread.start()
 
-    _ssdp_server = SSDPServer(local_ip, http_port)
+    _ssdp_server = SSDPServer(local_ip, http_port, settings.dlna_ssdp_port)
     _ssdp_server.start()
 
 
@@ -325,4 +351,8 @@ def dlna_status() -> dict:
         "http_port": settings.dlna_http_port,
         "description_url": f"http://{local_ip}:{settings.dlna_http_port}/dlna/description.xml",
         "friendly_name": settings.dlna_friendly_name,
+        "connect_hint": (
+            f"VLC/Kodi: add network stream → http://{local_ip}:{settings.dlna_http_port}/dlna/description.xml  |  "
+            f"Smart TV: auto-discovered via UPnP as '{settings.dlna_friendly_name}'"
+        ),
     }

@@ -1,5 +1,4 @@
 import json
-import hashlib
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -12,8 +11,9 @@ USERS_DB = Path("./config/users.json")
 @dataclass
 class User:
     username: str
-    hashed_password: str
-    role: str = "viewer"  # admin | viewer
+    hashed_password: str       # bcrypt — for web UI + FTP
+    nt_hash: str = ""          # NT hash — for SMB NTLM auth
+    role: str = "viewer"       # admin | viewer
     ftp_access: bool = True
     smb_access: bool = True
     dlna_access: bool = True
@@ -38,15 +38,17 @@ def get_user(username: str) -> Optional[User]:
     users = _load_users()
     data = users.get(username)
     if data:
+        # Tolerate records created before nt_hash field was added
+        data.setdefault("nt_hash", "")
         return User(**data)
     return None
 
 
-def create_user(username: str, hashed_password: str, role: str = "viewer") -> User:
+def create_user(username: str, hashed_password: str, nt_hash: str = "", role: str = "viewer") -> User:
     users = _load_users()
     if username in users:
         raise ValueError(f"User '{username}' already exists")
-    user = User(username=username, hashed_password=hashed_password, role=role)
+    user = User(username=username, hashed_password=hashed_password, nt_hash=nt_hash, role=role)
     users[username] = asdict(user)
     _save_users(users)
     return user
@@ -58,6 +60,7 @@ def update_user(username: str, **kwargs) -> Optional[User]:
         return None
     users[username].update(kwargs)
     _save_users(users)
+    users[username].setdefault("nt_hash", "")
     return User(**users[username])
 
 
@@ -71,4 +74,7 @@ def delete_user(username: str) -> bool:
 
 
 def list_users() -> list[User]:
-    return [User(**u) for u in _load_users().values()]
+    rows = _load_users()
+    for v in rows.values():
+        v.setdefault("nt_hash", "")
+    return [User(**u) for u in rows.values()]

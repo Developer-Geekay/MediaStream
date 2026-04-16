@@ -47,7 +47,7 @@
           <li><a href="#" class="nav-link active" data-tab="dashboard">Dashboard</a></li>
           <li><a href="#" class="nav-link" data-tab="media">Media Files</a></li>
           <li><a href="#" class="nav-link admin-only" data-tab="users">Users</a></li>
-          <li><a href="#" class="nav-link admin-only" data-tab="shares">Sharing</a></li>
+          <li><a href="#" class="nav-link admin-only" data-tab="connections">Connections</a></li>
         </ul>
         <div class="sidebar-user">
           <span id="nav-username"></span>
@@ -95,7 +95,9 @@
               </div>
               <p class="service-detail" id="smb-detail">Loading...</p>
               <div class="service-actions admin-only">
-                <button class="btn-primary btn-sm" onclick="applySmb()">Apply Config</button>
+                <button class="btn-primary btn-sm" onclick="startService('smb')">Start</button>
+                <button class="btn-danger btn-sm" onclick="stopService('smb')">Stop</button>
+                <button class="btn-secondary btn-sm" onclick="reloadSmb()">Reload Users</button>
               </div>
             </div>
             <div class="card service-card">
@@ -188,14 +190,10 @@
           </div>
         </div>
 
-        <!-- Shares Tab (admin) -->
-        <div id="tab-shares" class="tab hidden">
-          <h2>Sharing Configuration</h2>
-          <div class="card">
-            <h3>SMB / Samba Config Preview</h3>
-            <pre id="smb-config-preview" class="code-block">Loading...</pre>
-            <button class="btn-primary" onclick="applySmb()">Apply to System</button>
-          </div>
+        <!-- Connections Tab (admin) -->
+        <div id="tab-connections" class="tab hidden">
+          <h2>Connection Info</h2>
+          <div id="connection-cards" class="cards-row"></div>
         </div>
       </main>
     </div>

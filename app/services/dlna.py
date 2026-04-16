@@ -5,7 +5,6 @@ Compatible with VLC, Kodi, Smart TVs, and any UPnP/DLNA renderer.
 """
 from __future__ import annotations
 
-import os
 import platform
 import socket
 import struct
@@ -16,6 +15,7 @@ from pathlib import Path, PurePosixPath
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import unquote, quote
 from xml.etree.ElementTree import Element, SubElement, tostring
+from xml.sax.saxutils import escape as xml_escape
 
 from app.config import settings
 
@@ -39,7 +39,39 @@ MIME_MAP = {
     ".gif": "image/gif",
 }
 
-_IS_WINDOWS = platform.system() == "Windows"
+# Minimal ContentDirectory SCPD — clients fetch this before browsing
+_SCPD_XML = b"""<?xml version="1.0"?>
+<scpd xmlns="urn:schemas-upnp-org:service-1-0">
+  <specVersion><major>1</major><minor>0</minor></specVersion>
+  <actionList>
+    <action>
+      <name>Browse</name>
+      <argumentList>
+        <argument><name>ObjectID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ObjectID</relatedStateVariable></argument>
+        <argument><name>BrowseFlag</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_BrowseFlag</relatedStateVariable></argument>
+        <argument><name>Filter</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Filter</relatedStateVariable></argument>
+        <argument><name>StartingIndex</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Index</relatedStateVariable></argument>
+        <argument><name>RequestedCount</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument>
+        <argument><name>SortCriteria</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SortCriteria</relatedStateVariable></argument>
+        <argument><name>Result</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable></argument>
+        <argument><name>NumberReturned</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument>
+        <argument><name>TotalMatches</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument>
+        <argument><name>UpdateID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_UpdateID</relatedStateVariable></argument>
+      </argumentList>
+    </action>
+  </actionList>
+  <serviceStateTable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_ObjectID</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_Result</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_BrowseFlag</name><dataType>string</dataType><allowedValueList><allowedValue>BrowseMetadata</allowedValue><allowedValue>BrowseDirectChildren</allowedValue></allowedValueList></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_Filter</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_SortCriteria</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_Index</name><dataType>ui4</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_Count</name><dataType>ui4</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_UpdateID</name><dataType>ui4</dataType></stateVariable>
+    <stateVariable sendEvents="yes"><name>SystemUpdateID</name><dataType>ui4</dataType></stateVariable>
+  </serviceStateTable>
+</scpd>"""
 
 
 def _get_local_ip() -> str:
@@ -84,7 +116,6 @@ def _list_media_items(media_root: Path) -> list[dict]:
     items = []
     for f in sorted(media_root.rglob("*")):
         if f.is_file() and f.suffix.lower() in MIME_MAP:
-            # Always use forward slashes in URL paths regardless of OS
             rel_posix = PurePosixPath(*f.relative_to(media_root).parts)
             items.append({
                 "id": str(abs(hash(str(f)))),
@@ -97,7 +128,8 @@ def _list_media_items(media_root: Path) -> list[dict]:
     return items
 
 
-def _browse_response_xml(local_ip: str, http_port: int, media_root: Path) -> str:
+def _build_didl(local_ip: str, http_port: int, media_root: Path) -> tuple[str, int]:
+    """Return (didl_xml_string, item_count)."""
     items = _list_media_items(media_root)
     didl = Element(
         "DIDL-Lite",
@@ -117,16 +149,36 @@ def _browse_response_xml(local_ip: str, http_port: int, media_root: Path) -> str
             SubElement(el, "upnp:class").text = "object.item.audioItem.musicTrack"
         else:
             SubElement(el, "upnp:class").text = "object.item.imageItem.photo"
-        # URL-encode path so spaces/special chars in filenames are valid URLs.
-        # DLNA.ORG_OP=01 advertises byte-range (seek) support; without it many
-        # renderers refuse to play or disable seeking entirely.
         encoded_path = quote(item["rel_url"], safe="/")
         url = f"http://{local_ip}:{http_port}/dlna/media/{encoded_path}"
+        # DLNA.ORG_OP=01 = byte-seek supported (enables range requests / scrubbing)
         proto = f"http-get:*:{mime}:DLNA.ORG_OP=01;DLNA.ORG_FLAGS=01700000000000000000000000000000"
         res = SubElement(el, "res", protocolInfo=proto, size=str(item["size"]))
         res.text = url
 
-    return tostring(didl, encoding="unicode")
+    return tostring(didl, encoding="unicode"), len(items)
+
+
+def _soap_browse_response(didl_str: str, count: int) -> bytes:
+    # The <Result> element must contain the DIDL-Lite as XML-escaped text,
+    # NOT as raw embedded XML.  Embedding it raw produces malformed SOAP that
+    # every DLNA renderer rejects with "invalid path / could not be accessed".
+    escaped = xml_escape(didl_str)
+    soap = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"'
+        ' s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
+        "<s:Body>"
+        '<u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">'
+        f"<Result>{escaped}</Result>"
+        f"<NumberReturned>{count}</NumberReturned>"
+        f"<TotalMatches>{count}</TotalMatches>"
+        "<UpdateID>1</UpdateID>"
+        "</u:BrowseResponse>"
+        "</s:Body>"
+        "</s:Envelope>"
+    )
+    return soap.encode("utf-8")
 
 
 class DLNAHTTPHandler(BaseHTTPRequestHandler):
@@ -134,77 +186,90 @@ class DLNAHTTPHandler(BaseHTTPRequestHandler):
     local_ip: str = "127.0.0.1"
     http_port: int = 8200
 
-    def log_message(self, format, *args):
-        logger.debug("DLNA HTTP " + format, *args)
+    def log_message(self, fmt, *args):
+        logger.debug("DLNA %s %s", self.command if hasattr(self, "command") else "", fmt % args)
 
     def do_GET(self):
-        path = unquote(self.path)
+        path = unquote(self.path).split("?")[0]
 
         if path == "/dlna/description.xml":
-            body = _device_description_xml(self.local_ip, self.http_port).encode()
+            body = _device_description_xml(self.local_ip, self.http_port).encode("utf-8")
             self._respond(200, "text/xml; charset=utf-8", body)
 
+        elif path == "/dlna/content-directory.xml":
+            self._respond(200, "text/xml; charset=utf-8", _SCPD_XML)
+
         elif path.startswith("/dlna/media/"):
-            rel = path[len("/dlna/media/"):]
-            file_path = (self.media_root / Path(rel)).resolve()
-            # Prevent path traversal outside media root
-            if not str(file_path).startswith(str(self.media_root)):
-                self._respond(403, "text/plain", b"Forbidden")
-                return
-            if not file_path.exists() or not file_path.is_file():
-                logger.warning("DLNA: file not found: %s", file_path)
-                self._respond(404, "text/plain", b"Not found")
-                return
-            mime = MIME_MAP.get(file_path.suffix.lower(), "application/octet-stream")
-            file_size = file_path.stat().st_size
-            range_header = self.headers.get("Range")
-            if range_header:
-                start, end = self._parse_range(range_header, file_size)
-                length = end - start + 1
-                self.send_response(206)
-                self.send_header("Content-Type", mime)
-                self.send_header("Content-Length", str(length))
-                self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
-                self.send_header("Accept-Ranges", "bytes")
-                self.end_headers()
-                with open(file_path, "rb") as f:
-                    f.seek(start)
-                    self.wfile.write(f.read(length))
-            else:
-                self.send_response(200)
-                self.send_header("Content-Type", mime)
-                self.send_header("Content-Length", str(file_size))
-                self.send_header("Accept-Ranges", "bytes")
-                self.end_headers()
-                with open(file_path, "rb") as f:
-                    self.wfile.write(f.read())
+            self._serve_file(path[len("/dlna/media/"):])
+
         else:
             self._respond(404, "text/plain", b"Not found")
 
     def do_POST(self):
-        if unquote(self.path) == "/dlna/control":
+        path = unquote(self.path).split("?")[0]
+        if path == "/dlna/control":
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length).decode("utf-8", errors="replace")
             if "Browse" in body:
-                didl = _browse_response_xml(self.local_ip, self.http_port, self.media_root)
-                count = len(_list_media_items(self.media_root))
-                soap = f"""<?xml version="1.0"?>
-<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
-            s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-  <s:Body>
-    <u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
-      <Result>{didl}</Result>
-      <NumberReturned>{count}</NumberReturned>
-      <TotalMatches>{count}</TotalMatches>
-      <UpdateID>1</UpdateID>
-    </u:BrowseResponse>
-  </s:Body>
-</s:Envelope>"""
-                self._respond(200, "text/xml; charset=utf-8", soap.encode())
+                didl_str, count = _build_didl(self.local_ip, self.http_port, self.media_root)
+                logger.info("DLNA Browse: returning %d items", count)
+                self._respond(200, "text/xml; charset=utf-8", _soap_browse_response(didl_str, count))
             else:
-                self._respond(200, "text/xml", b"<ok/>")
+                self._respond(200, "text/xml; charset=utf-8", b"<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body/></s:Envelope>")
         else:
             self._respond(404, "text/plain", b"Not found")
+
+    def do_SUBSCRIBE(self):
+        # Clients SUBSCRIBE to the event URL before browsing.
+        # We don't implement eventing but must return 200 + SID so they proceed.
+        sid = f"uuid:{uuid.uuid4()}"
+        self.send_response(200)
+        self.send_header("SID", sid)
+        self.send_header("TIMEOUT", "Second-1800")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_UNSUBSCRIBE(self):
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _serve_file(self, rel: str):
+        file_path = (self.media_root / Path(rel)).resolve()
+        if not str(file_path).startswith(str(self.media_root)):
+            self._respond(403, "text/plain", b"Forbidden")
+            return
+        if not file_path.exists() or not file_path.is_file():
+            logger.warning("DLNA: file not found: %s", file_path)
+            self._respond(404, "text/plain", b"Not found")
+            return
+
+        mime = MIME_MAP.get(file_path.suffix.lower(), "application/octet-stream")
+        file_size = file_path.stat().st_size
+        range_header = self.headers.get("Range")
+
+        if range_header:
+            start, end = self._parse_range(range_header, file_size)
+            length = end - start + 1
+            self.send_response(206)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(length))
+            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("transferMode.dlna.org", "Streaming")
+            self.end_headers()
+            with open(file_path, "rb") as f:
+                f.seek(start)
+                self.wfile.write(f.read(length))
+        else:
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(file_size))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("transferMode.dlna.org", "Streaming")
+            self.end_headers()
+            with open(file_path, "rb") as f:
+                self.wfile.write(f.read())
 
     def _respond(self, code: int, content_type: str, body: bytes):
         self.send_response(code)
@@ -222,10 +287,7 @@ class DLNAHTTPHandler(BaseHTTPRequestHandler):
 
 
 class SSDPServer(threading.Thread):
-    """
-    Listens for UPnP M-SEARCH requests and replies with our device location.
-    Cross-platform: handles Windows socket quirks (no SO_REUSEPORT, different multicast join).
-    """
+    """Listens for UPnP M-SEARCH and sends ssdp:alive on startup."""
 
     def __init__(self, local_ip: str, http_port: int, ssdp_port: int):
         super().__init__(daemon=True, name="ssdp-server")
@@ -239,36 +301,28 @@ class SSDPServer(threading.Thread):
         try:
             self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            # SO_REUSEPORT is not available on Windows
             if hasattr(socket, "SO_REUSEPORT"):
                 try:
                     self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-                except (AttributeError, OSError):
+                except OSError:
                     pass
             self._sock.bind(("", self.ssdp_port))
         except OSError as e:
-            logger.warning(
-                "Cannot bind SSDP port %d: %s  "
-                "(on Linux/macOS run as root; on Windows run as Administrator, "
-                "or disable 'Function Discovery' service to free the port)",
-                self.ssdp_port, e,
-            )
+            logger.warning("Cannot bind SSDP port %d: %s", self.ssdp_port, e)
             return
 
-        # Join the UPnP multicast group
         try:
-            mreq = struct.pack("4s4s",
-                socket.inet_aton(SSDP_ADDR),
-                socket.inet_aton(self.local_ip),
-            )
+            mreq = struct.pack("4s4s", socket.inet_aton(SSDP_ADDR), socket.inet_aton(self.local_ip))
             self._sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         except OSError:
-            # Fallback: join on INADDR_ANY
             mreq = struct.pack("4sL", socket.inet_aton(SSDP_ADDR), socket.INADDR_ANY)
             self._sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 
         self._sock.settimeout(1.0)
         logger.info("SSDP discovery listening on %s:%d", SSDP_ADDR, self.ssdp_port)
+
+        # Announce ourselves immediately so clients discover us without M-SEARCH
+        self._send_alive()
 
         while not self._stop_event.is_set():
             try:
@@ -286,14 +340,34 @@ class SSDPServer(threading.Thread):
             except Exception as e:
                 logger.debug("SSDP recv error: %s", e)
 
+    def _location(self) -> str:
+        return f"http://{self.local_ip}:{self.http_port}/dlna/description.xml"
+
+    def _send_alive(self):
+        from email.utils import formatdate
+        notify = (
+            "NOTIFY * HTTP/1.1\r\n"
+            f"HOST: {SSDP_ADDR}:{self.ssdp_port}\r\n"
+            "CACHE-CONTROL: max-age=1800\r\n"
+            f"LOCATION: {self._location()}\r\n"
+            "NT: urn:schemas-upnp-org:device:MediaServer:1\r\n"
+            "NTS: ssdp:alive\r\n"
+            "SERVER: MediaStream/1.0 UPnP/1.0\r\n"
+            f"USN: uuid:{DEVICE_UUID}::urn:schemas-upnp-org:device:MediaServer:1\r\n"
+            "\r\n"
+        )
+        try:
+            self._sock.sendto(notify.encode(), (SSDP_ADDR, self.ssdp_port))
+        except Exception as e:
+            logger.debug("SSDP alive send error: %s", e)
+
     def _send_response(self, addr):
         from email.utils import formatdate
-        location = f"http://{self.local_ip}:{self.http_port}/dlna/description.xml"
         response = (
             "HTTP/1.1 200 OK\r\n"
             "CACHE-CONTROL: max-age=1800\r\n"
             f"DATE: {formatdate(usegmt=True)}\r\n"
-            f"LOCATION: {location}\r\n"
+            f"LOCATION: {self._location()}\r\n"
             "SERVER: MediaStream/1.0 UPnP/1.0\r\n"
             "ST: urn:schemas-upnp-org:device:MediaServer:1\r\n"
             f"USN: uuid:{DEVICE_UUID}::urn:schemas-upnp-org:device:MediaServer:1\r\n"
@@ -332,7 +406,7 @@ def start_dlna_server() -> None:
 
     def _run_http():
         logger.info(
-            "DLNA HTTP server on %s:%d  description: http://%s:%d/dlna/description.xml",
+            "DLNA HTTP on %s:%d  description: http://%s:%d/dlna/description.xml",
             local_ip, http_port, local_ip, http_port,
         )
         _http_server.serve_forever()
@@ -363,7 +437,7 @@ def dlna_status() -> dict:
         "description_url": f"http://{local_ip}:{settings.dlna_http_port}/dlna/description.xml",
         "friendly_name": settings.dlna_friendly_name,
         "connect_hint": (
-            f"VLC/Kodi: add network stream → http://{local_ip}:{settings.dlna_http_port}/dlna/description.xml  |  "
-            f"Smart TV: auto-discovered via UPnP as '{settings.dlna_friendly_name}'"
+            f"VLC/Kodi: open network → http://{local_ip}:{settings.dlna_http_port}/dlna/description.xml  |  "
+            f"Smart TV: auto-discovered as '{settings.dlna_friendly_name}'"
         ),
     }

@@ -2,6 +2,8 @@
 FTP service using pyftpdlib with optional TLS.
 Users are authenticated against the shared users DB.
 """
+from __future__ import annotations
+
 import threading
 import logging
 from pathlib import Path

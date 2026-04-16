@@ -3,6 +3,8 @@ DLNA/UPnP service — pure-Python, cross-platform (Linux, macOS, Windows).
 Broadcasts via SSDP and serves a MediaServer device description + content directory.
 Compatible with VLC, Kodi, Smart TVs, and any UPnP/DLNA renderer.
 """
+from __future__ import annotations
+
 import os
 import platform
 import socket

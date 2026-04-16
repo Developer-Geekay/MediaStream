@@ -8,8 +8,8 @@ echo "=== MediaStream Setup ==="
 echo "Platform: $(uname -s)"
 
 # Check Python version
-if ! $PYTHON -c "import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)" 2>/dev/null; then
-  echo "ERROR: Python 3.11+ required. Current: $($PYTHON --version 2>&1)"
+if ! $PYTHON -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" 2>/dev/null; then
+  echo "ERROR: Python 3.10+ required. Current: $($PYTHON --version 2>&1)"
   exit 1
 fi
 

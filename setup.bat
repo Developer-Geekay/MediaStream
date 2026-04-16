@@ -4,10 +4,16 @@ REM Run this script once to set up the environment, then use run.bat to start.
 
 echo === MediaStream Setup ===
 
-REM Check Python
+REM Check Python 3.10+
 python --version >nul 2>&1
 IF ERRORLEVEL 1 (
-    echo ERROR: Python not found. Install Python 3.11+ from https://python.org
+    echo ERROR: Python not found. Install Python 3.10+ from https://python.org
+    pause
+    exit /b 1
+)
+python -c "import sys; sys.exit(0 if sys.version_info>=(3,10) else 1)" >nul 2>&1
+IF ERRORLEVEL 1 (
+    echo ERROR: Python 3.10+ required. Download from https://python.org
     pause
     exit /b 1
 )

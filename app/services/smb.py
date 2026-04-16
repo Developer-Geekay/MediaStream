@@ -7,6 +7,8 @@ Connect from clients:
   macOS:     Finder → Go → Connect to Server → smb://<server-ip>:4450/MediaFiles
   Linux:     smbclient //server-ip/MediaFiles -p 4450 -U username
 """
+from __future__ import annotations
+
 import logging
 import threading
 from pathlib import Path

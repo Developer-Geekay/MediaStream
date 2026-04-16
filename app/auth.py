@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import binascii
+import hashlib
+import base64
 from datetime import datetime, timedelta
 from typing import Optional
+
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
@@ -12,10 +15,25 @@ from pydantic import BaseModel
 from app.config import settings
 from app.models import get_user, User
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
-
 ALGORITHM = "HS256"
+
+
+def _prepare(password: str) -> bytes:
+    # Pre-hash with SHA-256 so passwords > 72 bytes are handled safely,
+    # then base64-encode to keep the result null-byte-free.
+    return base64.b64encode(hashlib.sha256(password.encode()).digest())
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(_prepare(plain), hashed.encode())
+    except Exception:
+        return False
+
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(_prepare(password), bcrypt.gensalt()).decode()
 
 
 def compute_nt_hash(password: str) -> str:
@@ -24,8 +42,6 @@ def compute_nt_hash(password: str) -> str:
         from impacket import ntlm
         return binascii.hexlify(ntlm.compute_nthash(password)).decode()
     except Exception:
-        # Fallback: raw MD4 via hashlib (may be unavailable on some OpenSSL builds)
-        import hashlib
         try:
             h = hashlib.new("md4", password.encode("utf-16-le"))
             return h.hexdigest()
@@ -40,14 +56,6 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     username: Optional[str] = None
-
-
-def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
-
-
-def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
 
 
 def authenticate_user(username: str, password: str) -> Optional[User]:

@@ -64,8 +64,8 @@ def _build_server():
     if not smb_users:
         logger.warning("No SMB-capable users found (need at least one user with smb_access and a set NT hash)")
     else:
-        for u in smb_users:
-            server.setCredentials(u.username, "", settings.smb_workgroup, _EMPTY_LM, u.nt_hash.upper())
+        for uid, u in enumerate(smb_users):
+            server.addCredential(u.username, uid, _EMPTY_LM, u.nt_hash.upper())
             logger.debug("Registered SMB user: %s", u.username)
 
     return server

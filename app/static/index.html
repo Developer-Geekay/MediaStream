@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MediaStream</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Login -->
+    <div id="login-screen" class="screen">
+      <div class="login-card">
+        <div class="logo">
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+            <circle cx="24" cy="24" r="24" fill="#6366f1"/>
+            <polygon points="18,14 38,24 18,34" fill="white"/>
+          </svg>
+          <h1>MediaStream</h1>
+        </div>
+        <form id="login-form">
+          <div class="field">
+            <label>Username</label>
+            <input type="text" id="login-username" autocomplete="username" required />
+          </div>
+          <div class="field">
+            <label>Password</label>
+            <input type="password" id="login-password" autocomplete="current-password" required />
+          </div>
+          <div id="login-error" class="error hidden"></div>
+          <button type="submit" class="btn-primary btn-full">Sign In</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Main App -->
+    <div id="main-screen" class="screen hidden">
+      <nav class="sidebar">
+        <div class="sidebar-logo">
+          <svg width="32" height="32" viewBox="0 0 48 48" fill="none">
+            <circle cx="24" cy="24" r="24" fill="#6366f1"/>
+            <polygon points="18,14 38,24 18,34" fill="white"/>
+          </svg>
+          <span>MediaStream</span>
+        </div>
+        <ul class="nav-links">
+          <li><a href="#" class="nav-link active" data-tab="dashboard">Dashboard</a></li>
+          <li><a href="#" class="nav-link" data-tab="media">Media Files</a></li>
+          <li><a href="#" class="nav-link admin-only" data-tab="users">Users</a></li>
+          <li><a href="#" class="nav-link admin-only" data-tab="shares">Sharing</a></li>
+        </ul>
+        <div class="sidebar-user">
+          <span id="nav-username"></span>
+          <span id="nav-role" class="badge"></span>
+          <button id="logout-btn" class="btn-ghost btn-sm">Logout</button>
+        </div>
+      </nav>
+
+      <main class="content">
+        <!-- Dashboard Tab -->
+        <div id="tab-dashboard" class="tab active">
+          <h2>Dashboard</h2>
+          <div class="cards-row">
+            <div class="card stat-card" id="stat-files">
+              <div class="stat-icon">&#127916;</div>
+              <div class="stat-info">
+                <span class="stat-val" id="stat-total-files">—</span>
+                <span class="stat-label">Total Files</span>
+              </div>
+            </div>
+            <div class="card stat-card" id="stat-size">
+              <div class="stat-icon">&#128190;</div>
+              <div class="stat-info">
+                <span class="stat-val" id="stat-total-size">—</span>
+                <span class="stat-label">Total Size</span>
+              </div>
+            </div>
+          </div>
+          <div class="cards-row">
+            <div class="card service-card">
+              <div class="service-header">
+                <h3>FTP</h3>
+                <span id="ftp-badge" class="badge badge-off">OFF</span>
+              </div>
+              <p class="service-detail" id="ftp-detail">Loading...</p>
+              <div class="service-actions admin-only">
+                <button class="btn-primary btn-sm" onclick="startService('ftp')">Start</button>
+                <button class="btn-danger btn-sm" onclick="stopService('ftp')">Stop</button>
+              </div>
+            </div>
+            <div class="card service-card">
+              <div class="service-header">
+                <h3>SMB</h3>
+                <span id="smb-badge" class="badge badge-off">OFF</span>
+              </div>
+              <p class="service-detail" id="smb-detail">Loading...</p>
+              <div class="service-actions admin-only">
+                <button class="btn-primary btn-sm" onclick="applySmb()">Apply Config</button>
+              </div>
+            </div>
+            <div class="card service-card">
+              <div class="service-header">
+                <h3>DLNA</h3>
+                <span id="dlna-badge" class="badge badge-off">OFF</span>
+              </div>
+              <p class="service-detail" id="dlna-detail">Loading...</p>
+              <div class="service-actions admin-only">
+                <button class="btn-primary btn-sm" onclick="startService('dlna')">Start</button>
+                <button class="btn-danger btn-sm" onclick="stopService('dlna')">Stop</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Media Tab -->
+        <div id="tab-media" class="tab hidden">
+          <div class="tab-header">
+            <h2>Media Files</h2>
+            <div class="admin-only">
+              <button class="btn-primary btn-sm" onclick="showUpload()">Upload</button>
+              <button class="btn-secondary btn-sm" onclick="showMkdir()">New Folder</button>
+            </div>
+          </div>
+          <div class="breadcrumb" id="breadcrumb"></div>
+          <div id="media-list" class="media-grid"></div>
+          <!-- Upload modal -->
+          <div id="upload-modal" class="modal hidden">
+            <div class="modal-card">
+              <h3>Upload File</h3>
+              <input type="file" id="upload-input" multiple />
+              <div class="modal-actions">
+                <button class="btn-primary" onclick="doUpload()">Upload</button>
+                <button class="btn-ghost" onclick="hideModal('upload-modal')">Cancel</button>
+              </div>
+            </div>
+          </div>
+          <!-- Mkdir modal -->
+          <div id="mkdir-modal" class="modal hidden">
+            <div class="modal-card">
+              <h3>New Folder</h3>
+              <input type="text" id="mkdir-name" placeholder="Folder name" />
+              <div class="modal-actions">
+                <button class="btn-primary" onclick="doMkdir()">Create</button>
+                <button class="btn-ghost" onclick="hideModal('mkdir-modal')">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Users Tab (admin) -->
+        <div id="tab-users" class="tab hidden">
+          <div class="tab-header">
+            <h2>Users</h2>
+            <button class="btn-primary btn-sm" onclick="showAddUser()">Add User</button>
+          </div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Username</th><th>Role</th><th>FTP</th><th>SMB</th><th>DLNA</th><th>Status</th><th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="users-tbody"></tbody>
+          </table>
+          <!-- Add User modal -->
+          <div id="add-user-modal" class="modal hidden">
+            <div class="modal-card">
+              <h3>Add User</h3>
+              <div class="field"><label>Username</label><input type="text" id="new-username" /></div>
+              <div class="field"><label>Password</label><input type="password" id="new-password" /></div>
+              <div class="field">
+                <label>Role</label>
+                <select id="new-role">
+                  <option value="viewer">Viewer</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </div>
+              <div class="checkbox-group">
+                <label><input type="checkbox" id="new-ftp" checked /> FTP Access</label>
+                <label><input type="checkbox" id="new-smb" checked /> SMB Access</label>
+                <label><input type="checkbox" id="new-dlna" checked /> DLNA Access</label>
+              </div>
+              <div id="add-user-error" class="error hidden"></div>
+              <div class="modal-actions">
+                <button class="btn-primary" onclick="doAddUser()">Create</button>
+                <button class="btn-ghost" onclick="hideModal('add-user-modal')">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Shares Tab (admin) -->
+        <div id="tab-shares" class="tab hidden">
+          <h2>Sharing Configuration</h2>
+          <div class="card">
+            <h3>SMB / Samba Config Preview</h3>
+            <pre id="smb-config-preview" class="code-block">Loading...</pre>
+            <button class="btn-primary" onclick="applySmb()">Apply to System</button>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

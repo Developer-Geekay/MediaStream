@@ -1,6 +1,7 @@
 import yaml
 import os
 from pathlib import Path
+from typing import Optional
 from pydantic_settings import BaseSettings
 
 
@@ -23,6 +24,7 @@ class Settings(BaseSettings):
     secret_key: str = _cfg.get("app", {}).get("secret_key", "changeme")
     token_expire_minutes: int = _cfg.get("app", {}).get("token_expire_minutes", 1440)
     media_root: str = _cfg.get("media", {}).get("root_path", "./media")
+    media_mappings: list = _cfg.get("media", {}).get("mappings", []) or []
     allowed_extensions: list = _cfg.get("media", {}).get("allowed_extensions", [])
 
     ftp_enabled: bool = _cfg.get("ftp", {}).get("enabled", True)
@@ -52,3 +54,61 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def get_media_mappings() -> list[dict]:
+    """
+    Return the effective list of media mappings as {name, path: Path} dicts.
+
+    Priority:
+      1. Runtime JSON store (config/media_mappings.json) — managed via web UI
+      2. config.yaml static list — fallback for deployments that prefer config files
+      3. media_root — single-folder legacy mode
+    """
+    # 1. Runtime store (web-UI managed)
+    from app.services.media_mappings import load_mappings
+    mappings = load_mappings()
+    if mappings:
+        return mappings
+
+    # 2. config.yaml static list
+    raw = settings.media_mappings
+    if raw:
+        result = []
+        for entry in raw:
+            name = (entry.get("name") or "").strip()
+            path_str = (entry.get("path") or "").strip()
+            if name and path_str:
+                result.append({"name": name, "path": Path(path_str).resolve()})
+        if result:
+            return result
+
+    # 3. Fallback: treat media_root as a single mapping
+    return [{"name": "media", "path": Path(settings.media_root).resolve()}]
+
+
+def resolve_media_path(virtual: str) -> tuple[Optional[str], Optional[Path], Optional[Path]]:
+    """
+    Resolve a virtual path (e.g. "Movies/Action/film.mkv") to:
+      (mapping_name, mapping_root, absolute_fs_path)
+
+    Returns (None, None, None) when virtual is empty (caller handles virtual root).
+    Raises ValueError on path-traversal attempts or unknown mapping names.
+    """
+    virtual = virtual.strip("/")
+    if not virtual:
+        return None, None, None
+
+    parts = Path(virtual).parts
+    mapping_name = parts[0]
+    rest = Path(*parts[1:]) if len(parts) > 1 else Path(".")
+
+    for m in get_media_mappings():
+        if m["name"] == mapping_name:
+            mapping_root = m["path"]
+            target = (mapping_root / rest).resolve()
+            if not str(target).startswith(str(mapping_root)):
+                raise ValueError("Path traversal detected")
+            return mapping_name, mapping_root, target
+
+    raise ValueError(f"Mapping '{mapping_name}' not found")

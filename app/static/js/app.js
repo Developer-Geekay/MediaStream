@@ -96,7 +96,7 @@ function switchTab(name) {
   const tab = document.getElementById(`tab-${name}`);
   if (tab) tab.classList.add('active');
   if (name === 'dashboard') loadDashboard();
-  if (name === 'media') loadMedia('');
+  if (name === 'media') { loadMappings(); loadMedia(''); }
   if (name === 'users') loadUsers();
   if (name === 'connections') loadConnections();
 }
@@ -215,17 +215,54 @@ async function loadMedia(path) {
 }
 
 function streamFile(path, mime) {
-  const url = `/api/media/stream?path=${encodeURIComponent(path)}`;
-  const win = window.open('', '_blank');
-  if (mime.startsWith('video')) {
-    win.document.write(`<video controls autoplay style="max-width:100%;background:#000"><source src="${url}" type="${mime}">Your browser does not support this video.</video>`);
-  } else if (mime.startsWith('audio')) {
-    win.document.write(`<audio controls autoplay style="margin:40px"><source src="${url}" type="${mime}"></audio>`);
-  } else if (mime.startsWith('image')) {
-    win.document.write(`<img src="${url}" style="max-width:100%" />`);
-  } else {
-    win.location.href = url;
+  const url = `/api/media/stream?path=${encodeURIComponent(path)}&token=${encodeURIComponent(token)}`;
+  const name = path.split('/').pop();
+
+  const modal = document.getElementById('player-modal');
+  const video = document.getElementById('player-video');
+  const audio = document.getElementById('player-audio');
+  const img   = document.getElementById('player-image');
+
+  if (!modal || !video || !audio || !img) {
+    // Old cached page — force reload to get updated HTML
+    window.location.reload(true);
+    return;
   }
+
+  document.getElementById('player-title').textContent = name;
+
+  video.style.display = 'none'; video.src = '';
+  audio.style.display = 'none'; audio.src = '';
+  img.style.display   = 'none'; img.src   = '';
+
+  if (mime.startsWith('video')) {
+    video.src = url;
+    video.style.display = 'block';
+    video.load();
+  } else if (mime.startsWith('audio')) {
+    audio.src = url;
+    audio.style.display = 'block';
+    audio.load();
+  } else if (mime.startsWith('image')) {
+    img.src = url;
+    img.style.display = 'block';
+  } else {
+    window.location.href = url;
+    return;
+  }
+
+  modal.classList.remove('hidden');
+}
+
+function closePlayer(e) {
+  if (e && e.target !== document.getElementById('player-modal')) return;
+  const video = document.getElementById('player-video');
+  const audio = document.getElementById('player-audio');
+  try { video.pause(); } catch(_) {}
+  try { audio.pause(); } catch(_) {}
+  video.src = '';
+  audio.src = '';
+  document.getElementById('player-modal').classList.add('hidden');
 }
 
 async function deleteItem(path) {
@@ -266,6 +303,130 @@ async function doMkdir() {
     hideModal('mkdir-modal');
     loadMedia(currentPath);
   } catch (e) { toast(e.message, 'error'); }
+}
+
+// ---- Folder Mappings ----
+async function loadMappings() {
+  if (!currentUser || currentUser.role !== 'admin') return;
+  const chips = document.getElementById('mapping-chips');
+  if (!chips) return;
+  try {
+    const data = await api('GET', '/mappings/');
+    if (!data) return;
+    chips.textContent = '';
+    if (!data.length) {
+      const msg = document.createElement('span');
+      msg.className = 'mapping-empty';
+      msg.textContent = 'No folders mapped — click "+ Add Folder" to get started';
+      chips.appendChild(msg);
+      return;
+    }
+    data.forEach(m => {
+      const chip = document.createElement('span');
+      chip.className = 'mapping-chip' + (m.exists ? '' : ' missing');
+      chip.title = m.path;
+      chip.appendChild(document.createTextNode('📁 ' + m.name));
+      chip.addEventListener('click', () => loadMedia(m.name));
+
+      const rm = document.createElement('button');
+      rm.className = 'mapping-chip-remove';
+      rm.title = 'Remove mapping';
+      rm.textContent = '×';
+      rm.addEventListener('click', (e) => { e.stopPropagation(); removeMapping(m.name); });
+      chip.appendChild(rm);
+      chips.appendChild(chip);
+    });
+  } catch(e) { /* non-fatal */ }
+}
+
+function showAddMapping() {
+  document.getElementById('mapping-path').value = '';
+  document.getElementById('mapping-name').value = '';
+  document.getElementById('add-mapping-error').classList.add('hidden');
+  document.getElementById('fs-browser-path').textContent = 'Loading…';
+  document.getElementById('fs-dir-list').textContent = '';
+  document.getElementById('add-mapping-modal').classList.remove('hidden');
+  browseFsPath('');   // start at home directory
+}
+
+async function browseFsPath(path) {
+  try {
+    const qs = path ? `?path=${encodeURIComponent(path)}` : '';
+    const data = await api('GET', `/mappings/fs${qs}`);
+    if (!data) return;
+
+    document.getElementById('mapping-path').value = data.path;
+
+    // Auto-fill nickname from last path segment when field is still blank
+    const nameInput = document.getElementById('mapping-name');
+    if (!nameInput.value.trim()) {
+      const segments = data.path.replace(/\/$/, '').split('/').filter(Boolean);
+      nameInput.value = segments[segments.length - 1] || '';
+    }
+
+    document.getElementById('fs-browser-path').textContent = data.path;
+
+    const list = document.getElementById('fs-dir-list');
+    list.textContent = '';
+
+    if (data.parent) {
+      const up = document.createElement('div');
+      up.className = 'fs-dir-item fs-parent';
+      up.textContent = '📁 ..';
+      up.addEventListener('click', () => browseFsPath(data.parent));
+      list.appendChild(up);
+    }
+
+    if (!data.dirs.length) {
+      const empty = document.createElement('div');
+      empty.className = 'fs-empty';
+      empty.textContent = 'No subdirectories';
+      list.appendChild(empty);
+    } else {
+      data.dirs.forEach(dir => {
+        const fullPath = data.path.replace(/\/$/, '') + '/' + dir;
+        const row = document.createElement('div');
+        row.className = 'fs-dir-item';
+        row.textContent = '📁 ' + dir;
+        row.addEventListener('click', () => browseFsPath(fullPath));
+        list.appendChild(row);
+      });
+    }
+  } catch(e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function doAddMapping() {
+  const path = document.getElementById('mapping-path').value.trim();
+  const name = document.getElementById('mapping-name').value.trim();
+  const err  = document.getElementById('add-mapping-error');
+  if (!path) {
+    err.textContent = 'Please browse to or enter a folder path.';
+    err.classList.remove('hidden');
+    return;
+  }
+  try {
+    await api('POST', '/mappings/', { path, name: name || null });
+    hideModal('add-mapping-modal');
+    toast('Folder added', 'success');
+    loadMappings();
+    loadMedia('');
+  } catch(e) {
+    err.textContent = e.message;
+    err.classList.remove('hidden');
+  }
+}
+
+async function removeMapping(name) {
+  if (!confirm(`Remove folder "${name}"?\n\nFiles are not deleted — only the mapping is removed.`)) return;
+  try {
+    await api('DELETE', `/mappings/${encodeURIComponent(name)}`);
+    toast(`"${name}" removed`, 'success');
+    loadMappings();
+    if (currentPath === name || currentPath.startsWith(name + '/')) loadMedia('');
+    else loadMedia(currentPath);
+  } catch(e) { toast(e.message, 'error'); }
 }
 
 // ---- Users ----

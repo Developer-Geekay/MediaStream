@@ -74,6 +74,19 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     return jwt.encode(to_encode, settings.secret_key, algorithm=ALGORITHM)
 
 
+def validate_token(raw: str) -> Optional[User]:
+    """Validate a raw JWT string and return the User, or None if invalid."""
+    try:
+        payload = jwt.decode(raw, settings.secret_key, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if not username:
+            return None
+        user = get_user(username)
+        return user if user and not user.disabled else None
+    except JWTError:
+        return None
+
+
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     credentials_exc = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

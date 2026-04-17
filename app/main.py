@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from app.config import settings
 from app.models import create_user, get_user
 from app.auth import hash_password, compute_nt_hash
-from app.routers import auth, users, media, shares
+from app.routers import auth, users, media, shares, mappings
 from app.services import ftp as ftp_service
 from app.services import smb as smb_service
 from app.services import dlna as dlna_service
@@ -90,6 +90,7 @@ app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(media.router)
 app.include_router(shares.router)
+app.include_router(mappings.router)
 
 _static_dir = Path(__file__).parent / "static"
 if _static_dir.exists():
@@ -100,7 +101,10 @@ if _static_dir.exists():
 async def root():
     index = Path(__file__).parent / "static" / "index.html"
     if index.exists():
-        return FileResponse(str(index))
+        return FileResponse(
+            str(index),
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
     return {"message": "MediaStream API", "docs": "/api/docs"}
 
 

@@ -118,11 +118,21 @@
         <div id="tab-media" class="tab">
           <div class="tab-header">
             <h2>Media Files</h2>
-            <div class="admin-only">
+            <div class="admin-only" style="display:flex;gap:8px">
+              <button class="btn-secondary btn-sm" onclick="showAddMapping()">+ Add Folder</button>
               <button class="btn-primary btn-sm" onclick="showUpload()">Upload</button>
               <button class="btn-secondary btn-sm" onclick="showMkdir()">New Folder</button>
             </div>
           </div>
+
+          <!-- Mapped folders bar (admin only) -->
+          <div class="mapping-bar admin-only" id="mapping-bar">
+            <span class="mapping-bar-label">Folders</span>
+            <div class="mapping-chips" id="mapping-chips">
+              <span class="mapping-empty">No folders mapped — click &ldquo;+ Add Folder&rdquo; to get started</span>
+            </div>
+          </div>
+
           <div class="breadcrumb" id="breadcrumb"></div>
           <div id="media-list" class="media-grid"></div>
           <!-- Upload modal -->
@@ -144,6 +154,34 @@
               <div class="modal-actions">
                 <button class="btn-primary" onclick="doMkdir()">Create</button>
                 <button class="btn-ghost" onclick="hideModal('mkdir-modal')">Cancel</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Add Folder Mapping modal -->
+          <div id="add-mapping-modal" class="modal hidden">
+            <div class="modal-card folder-picker-modal">
+              <h3>Add Folder</h3>
+              <div class="field">
+                <label>Path on this server</label>
+                <div class="path-row">
+                  <input type="text" id="mapping-path" placeholder="/path/to/folder"
+                         onkeydown="if(event.key==='Enter'){event.preventDefault();browseFsPath(this.value)}" />
+                  <button class="btn-secondary btn-sm" onclick="browseFsPath(document.getElementById('mapping-path').value)">Go</button>
+                </div>
+              </div>
+              <div class="fs-browser" id="fs-browser">
+                <div class="fs-browser-path" id="fs-browser-path">Loading…</div>
+                <div id="fs-dir-list"></div>
+              </div>
+              <div class="field" style="margin-top:12px">
+                <label>Nickname <small style="text-transform:none;letter-spacing:0;font-weight:400">(optional — uses folder name if blank)</small></label>
+                <input type="text" id="mapping-name" placeholder="e.g. Movies" />
+              </div>
+              <div id="add-mapping-error" class="error hidden"></div>
+              <div class="modal-actions">
+                <button class="btn-primary" onclick="doAddMapping()">Add Folder</button>
+                <button class="btn-ghost" onclick="hideModal('add-mapping-modal')">Cancel</button>
               </div>
             </div>
           </div>
@@ -196,6 +234,19 @@
           <div id="connection-cards" class="cards-row"></div>
         </div>
       </main>
+    </div>
+  </div>
+
+  <!-- Media Player Modal -->
+  <div id="player-modal" class="modal hidden" onclick="closePlayer(event)">
+    <div class="modal-card player-card" onclick="event.stopPropagation()">
+      <div class="player-header">
+        <span id="player-title" class="player-title"></span>
+        <button class="btn-ghost btn-sm" onclick="closePlayer()">✕</button>
+      </div>
+      <video id="player-video" controls playsinline style="width:100%;border-radius:6px;background:#000;max-height:70vh;display:none"></video>
+      <audio id="player-audio" controls style="width:100%;margin-top:8px;display:none"></audio>
+      <img   id="player-image" style="width:100%;border-radius:6px;display:none" />
     </div>
   </div>
 

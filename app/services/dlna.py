@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import platform
 import socket
+import socketserver
 import struct
 import threading
 import uuid
@@ -56,8 +57,12 @@ MIME_MAP = {
     ".webp": "image/webp",
 }
 
-# DLNA protocolInfo flags: byte-seek (OP=01) + streaming transfer mode
-_DLNA_FLAGS = "DLNA.ORG_OP=01;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+# DLNA protocolInfo flags:
+#   OP=01  — byte-seek supported
+#   CI=0   — content is native (not transcoded)
+#   FLAGS  — 01500000: Streaming (bit 24) + Background (bit 22); Connection Stall (bit 21) removed
+#            BigScreen VR / Quest mishandles Connection Stall, causing playback failure.
+_DLNA_FLAGS = "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01500000000000000000000000000000"
 
 # Minimal ContentDirectory SCPD — clients fetch this before browsing
 _SCPD_XML = b"""<?xml version="1.0"?>
@@ -120,6 +125,11 @@ def _device_description_xml(local_ip: str, http_port: int) -> str:
     SubElement(device, "modelName").text = "MediaStream"
     SubElement(device, "modelNumber").text = "1.0"
     SubElement(device, "UDN").text = f"uuid:{DEVICE_UUID}"
+    # Required by BigScreen VR / strict DLNA renderers to identify this as a proper DMS
+    SubElement(
+        device, "dlna:X_DLNADOC",
+        attrib={"xmlns:dlna": "urn:schemas-dlna-org:device-1-0"},
+    ).text = "DMS-1.50"
 
     service_list = SubElement(device, "serviceList")
     svc = SubElement(service_list, "service")
@@ -133,18 +143,36 @@ def _device_description_xml(local_ip: str, http_port: int) -> str:
 
 
 def _list_media_items(media_root: Path) -> list[dict]:
+    """List all media files across every configured mapping.
+
+    The virtual URL for each file is "<MappingName>/<relative-posix-path>",
+    which both the DLNA HTTP handler and the web API can resolve back to the
+    real filesystem path via resolve_media_path().
+
+    media_root is kept as a parameter for call-site compatibility but is only
+    used as a fallback when no mappings are configured.
+    """
+    from app.config import get_media_mappings
+    mappings = get_media_mappings()
+
     items = []
-    for f in sorted(media_root.rglob("*")):
-        if f.is_file() and f.suffix.lower() in MIME_MAP:
-            rel_posix = PurePosixPath(*f.relative_to(media_root).parts)
-            items.append({
-                "id": str(abs(hash(str(f)))),
-                "path": f,
-                "rel_url": str(rel_posix),
-                "name": f.name,
-                "mime": MIME_MAP[f.suffix.lower()],
-                "size": f.stat().st_size,
-            })
+    for m in mappings:
+        mapping_name: str = m["name"]
+        mapping_path: Path = m["path"]
+        if not mapping_path.exists():
+            continue
+        for f in sorted(mapping_path.rglob("*")):
+            if f.is_file() and f.suffix.lower() in MIME_MAP:
+                rel_posix = PurePosixPath(*f.relative_to(mapping_path).parts)
+                rel_url = f"{mapping_name}/{rel_posix}"
+                items.append({
+                    "id": str(abs(hash(str(f)))),
+                    "path": f,
+                    "rel_url": rel_url,
+                    "name": f.name,
+                    "mime": MIME_MAP[f.suffix.lower()],
+                    "size": f.stat().st_size,
+                })
     return items
 
 
@@ -265,31 +293,46 @@ class DLNAHTTPHandler(BaseHTTPRequestHandler):
     local_ip: str = "127.0.0.1"
     http_port: int = 8200
 
+    # Suppress the default per-request stdout line; we emit our own structured logs.
     def log_message(self, fmt, *args):
-        logger.debug("DLNA %s %s", self.command if hasattr(self, "command") else "", fmt % args)
+        pass
+
+    def _client_tag(self) -> str:
+        """Return 'IP | User-Agent' for log lines (UA truncated to 60 chars)."""
+        ip = self.client_address[0] if self.client_address else "?"
+        ua = (self.headers.get("User-Agent", "unknown") if self.headers else "unknown")[:60]
+        return f"{ip} | {ua}"
 
     def do_GET(self):
         path = unquote(self.path).split("?")[0]
+        tag = self._client_tag()
 
         if path == "/dlna/description.xml":
+            logger.info("DLNA DISCOVERY  [%s]  → description.xml", tag)
             body = _device_description_xml(self.local_ip, self.http_port).encode("utf-8")
             self._respond(200, "text/xml; charset=utf-8", body)
 
         elif path == "/dlna/content-directory.xml":
+            logger.debug("DLNA SCPD       [%s]  → content-directory.xml", tag)
             self._respond(200, "text/xml; charset=utf-8", _SCPD_XML)
 
         elif path.startswith("/dlna/media/"):
             self._serve_file(path[len("/dlna/media/"):])
 
         else:
+            logger.debug("DLNA 404        [%s]  → %s", tag, path)
             self._respond(404, "text/plain", b"Not found")
 
     def do_HEAD(self):
         """Answer HEAD requests so clients can get file size before streaming."""
         path = unquote(self.path).split("?")[0]
+        tag = self._client_tag()
         if path.startswith("/dlna/media/"):
-            self._serve_file_head(path[len("/dlna/media/"):])
+            rel = path[len("/dlna/media/"):]
+            logger.info("DLNA HEAD       [%s]  → %s (prefetch size)", tag, rel)
+            self._serve_file_head(rel)
         elif path == "/dlna/description.xml":
+            logger.debug("DLNA HEAD       [%s]  → description.xml", tag)
             body = _device_description_xml(self.local_ip, self.http_port).encode("utf-8")
             self._send_head(200, "text/xml; charset=utf-8", len(body))
         else:
@@ -297,7 +340,9 @@ class DLNAHTTPHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = unquote(self.path).split("?")[0]
+        tag = self._client_tag()
         if path != "/dlna/control":
+            logger.debug("DLNA POST 404   [%s]  → %s", tag, path)
             self._respond(404, "text/plain", b"Not found")
             return
 
@@ -305,6 +350,9 @@ class DLNAHTTPHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length).decode("utf-8", errors="replace")
 
         if "Browse" not in body:
+            # Non-Browse SOAP action (e.g. GetSystemUpdateID) — ack and ignore
+            action = self.headers.get("SOAPAction", "unknown")
+            logger.debug("DLNA SOAP       [%s]  action=%s (ignored)", tag, action)
             self._respond(200, "text/xml; charset=utf-8",
                           b'<?xml version="1.0"?>'
                           b'<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'
@@ -315,26 +363,32 @@ class DLNAHTTPHandler(BaseHTTPRequestHandler):
         browse_flag = args["BrowseFlag"]
         start = args["StartingIndex"]
         count = args["RequestedCount"]
+        obj_id = args["ObjectID"]
 
-        if browse_flag == "BrowseMetadata" and args["ObjectID"] == "0":
+        if browse_flag == "BrowseMetadata" and obj_id == "0":
             # BigScreen (and others) request root container metadata first
             all_items = _list_media_items(self.media_root)
             didl_str = _build_root_container_didl(len(all_items))
             resp = _soap_browse_response(didl_str, 1, 1)
-            logger.info("DLNA BrowseMetadata: root container (%d items)", len(all_items))
+            logger.info(
+                "DLNA BROWSE     [%s]  BrowseMetadata  objectId=0  total=%d",
+                tag, len(all_items),
+            )
         else:
             didl_str, returned, total = _build_didl(
                 self.local_ip, self.http_port, self.media_root, start, count
             )
             resp = _soap_browse_response(didl_str, returned, total)
             logger.info(
-                "DLNA BrowseDirectChildren: start=%d count=%d returned=%d total=%d",
-                start, count, returned, total,
+                "DLNA BROWSE     [%s]  BrowseDirectChildren  objectId=%s  start=%d count=%d  returned=%d/%d",
+                tag, obj_id, start, count, returned, total,
             )
 
         self._respond(200, "text/xml; charset=utf-8", resp)
 
     def do_SUBSCRIBE(self):
+        tag = self._client_tag()
+        logger.debug("DLNA SUBSCRIBE  [%s]  path=%s", tag, self.path)
         sid = f"uuid:{uuid.uuid4()}"
         self.send_response(200)
         self.send_header("SID", sid)
@@ -343,20 +397,26 @@ class DLNAHTTPHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_UNSUBSCRIBE(self):
+        tag = self._client_tag()
+        logger.debug("DLNA UNSUBSCRIBE[%s]  path=%s", tag, self.path)
         self.send_response(200)
         self.send_header("Content-Length", "0")
         self.end_headers()
 
     def _serve_file_head(self, rel: str):
-        file_path = (self.media_root / Path(rel)).resolve()
-        if not str(file_path).startswith(str(self.media_root)):
-            self._send_head(403, "text/plain", 0)
+        from app.config import resolve_media_path
+        try:
+            _, _, file_path = resolve_media_path(rel)
+        except ValueError:
+            self._send_head(404, "text/plain", 0)
             return
-        if not file_path.exists() or not file_path.is_file():
+        if not file_path or not file_path.exists() or not file_path.is_file():
             self._send_head(404, "text/plain", 0)
             return
         mime = MIME_MAP.get(file_path.suffix.lower(), "application/octet-stream")
-        self._send_head(200, mime, file_path.stat().st_size)
+        size = file_path.stat().st_size
+        logger.debug("DLNA HEAD OK    size=%d  mime=%s  file=%s", size, mime, file_path.name)
+        self._send_head(200, mime, size)
 
     def _send_head(self, code: int, content_type: str, size: int):
         self.send_response(code)
@@ -366,31 +426,57 @@ class DLNAHTTPHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _serve_file(self, rel: str):
-        file_path = (self.media_root / Path(rel)).resolve()
-        if not str(file_path).startswith(str(self.media_root)):
-            self._respond(403, "text/plain", b"Forbidden")
+        from app.config import resolve_media_path
+        tag = self._client_tag()
+        try:
+            _, _, file_path = resolve_media_path(rel)
+        except ValueError as exc:
+            detail = str(exc)
+            if "traversal" in detail:
+                logger.warning("DLNA FORBIDDEN  [%s]  %s", tag, rel)
+                self._respond(403, "text/plain", b"Forbidden")
+            else:
+                logger.warning("DLNA NOT FOUND  [%s]  %s — %s", tag, rel, detail)
+                self._respond(404, "text/plain", b"Not found")
             return
-        if not file_path.exists() or not file_path.is_file():
-            logger.warning("DLNA: file not found: %s", file_path)
+        if not file_path or not file_path.exists() or not file_path.is_file():
+            logger.warning("DLNA NOT FOUND  [%s]  %s", tag, rel)
             self._respond(404, "text/plain", b"Not found")
             return
 
         mime = MIME_MAP.get(file_path.suffix.lower(), "application/octet-stream")
         file_size = file_path.stat().st_size
         range_header = self.headers.get("Range")
-        content_features = f"DLNA.ORG_OP=01;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+        # Use the same flags as declared in protocolInfo (keeps ContentFeatures in sync)
+        content_features = _DLNA_FLAGS
 
         if range_header:
             start, end = self._parse_range(range_header, file_size)
-            length = end - start + 1
-            self.send_response(206)
-            self.send_header("Content-Type", mime)
-            self.send_header("Content-Length", str(length))
-            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
-            self.send_header("Accept-Ranges", "bytes")
-            self.send_header("transferMode.dlna.org", "Streaming")
-            self.send_header("ContentFeatures.dlna.org", content_features)
-            self.end_headers()
+            logger.info(
+                "DLNA STREAM     [%s]  %s  range=%s → bytes %d-%d/%d  (%.1f MB)",
+                tag, file_path.name, range_header, start, end, file_size,
+                (end - start + 1) / 1_048_576,
+            )
+        else:
+            # Always respond with 206 even for full-file requests.
+            # BigScreen VR and some TVs only accept 206; a plain 200 causes silent failure.
+            start, end = 0, file_size - 1
+            logger.info(
+                "DLNA STREAM     [%s]  %s  no Range header → full file as 206  (%.1f MB)",
+                tag, file_path.name, file_size / 1_048_576,
+            )
+
+        length = end - start + 1
+        self.send_response(206)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(length))
+        self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("transferMode.dlna.org", "Streaming")
+        self.send_header("ContentFeatures.dlna.org", content_features)
+        self.end_headers()
+        sent = 0
+        try:
             with open(file_path, "rb") as f:
                 f.seek(start)
                 remaining = length
@@ -399,21 +485,17 @@ class DLNAHTTPHandler(BaseHTTPRequestHandler):
                     if not chunk:
                         break
                     self.wfile.write(chunk)
+                    sent += len(chunk)
                     remaining -= len(chunk)
-        else:
-            self.send_response(200)
-            self.send_header("Content-Type", mime)
-            self.send_header("Content-Length", str(file_size))
-            self.send_header("Accept-Ranges", "bytes")
-            self.send_header("transferMode.dlna.org", "Streaming")
-            self.send_header("ContentFeatures.dlna.org", content_features)
-            self.end_headers()
-            with open(file_path, "rb") as f:
-                while True:
-                    chunk = f.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
+            logger.debug(
+                "DLNA STREAM OK  [%s]  %s  sent=%d/%d bytes",
+                tag, file_path.name, sent, length,
+            )
+        except (BrokenPipeError, ConnectionResetError):
+            logger.debug(
+                "DLNA STREAM END [%s]  %s  client disconnected after %d/%d bytes",
+                tag, file_path.name, sent, length,
+            )
 
     def _respond(self, code: int, content_type: str, body: bytes):
         self.send_response(code)
@@ -523,6 +605,14 @@ class SSDPServer(threading.Thread):
 
     def _handle_msearch(self, msg: str, addr):
         """Respond to M-SEARCH for any of our advertised types (or ssdp:all)."""
+        # Extract ST (search target) from M-SEARCH for logging
+        st = "unknown"
+        for line in msg.splitlines():
+            if line.upper().startswith("ST:"):
+                st = line.split(":", 1)[1].strip()
+                break
+        logger.info("SSDP M-SEARCH   [%s:%d]  ST=%s", addr[0], addr[1], st)
+
         search_all = "ssdp:all" in msg
         for nt in self._NT_TYPES:
             if search_all or nt in msg:
@@ -561,7 +651,28 @@ class SSDPServer(threading.Thread):
                 pass
 
 
-_http_server: HTTPServer | None = None
+class _QuietHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    """Multi-threaded DLNA HTTP server.
+
+    ThreadingMixIn gives each incoming connection its own thread so VLC,
+    BigScreen VR, and other players can make concurrent range requests
+    (buffering + seeking) without blocking each other.
+
+    Suppress BrokenPipeError tracebacks that occur when a streaming client
+    disconnects mid-transfer (normal during seek / stop in video players).
+    """
+    daemon_threads = True  # threads die with the server, don't block shutdown
+
+    def handle_error(self, request, client_address):
+        import sys
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+            logger.debug("DLNA: client %s disconnected mid-stream", client_address[0])
+        else:
+            super().handle_error(request, client_address)
+
+
+_http_server: _QuietHTTPServer | None = None
 _ssdp_server: SSDPServer | None = None
 _http_thread: threading.Thread | None = None
 
@@ -576,7 +687,7 @@ def start_dlna_server() -> None:
     DLNAHTTPHandler.local_ip = local_ip
     DLNAHTTPHandler.http_port = http_port
 
-    _http_server = HTTPServer(("0.0.0.0", http_port), DLNAHTTPHandler)
+    _http_server = _QuietHTTPServer(("0.0.0.0", http_port), DLNAHTTPHandler)
 
     def _run_http():
         logger.info(

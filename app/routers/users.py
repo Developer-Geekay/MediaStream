@@ -1,3 +1,4 @@
+import re
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 from typing import Optional
@@ -26,8 +27,8 @@ class CreateUserRequest(BaseModel):
     @field_validator("username")
     @classmethod
     def valid_username(cls, v):
-        if not v.isalnum() or len(v) < 2:
-            raise ValueError("username must be alphanumeric and at least 2 chars")
+        if not re.match(r'^[a-zA-Z0-9_-]{2,}$', v):
+            raise ValueError("username must be 2+ chars, letters/numbers/underscores/hyphens only")
         return v.lower()
 
     @field_validator("password")

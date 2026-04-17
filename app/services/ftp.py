@@ -100,7 +100,10 @@ def start_ftp_server() -> None:
 
     def _run():
         logger.info("FTP server starting on %s:%d", settings.ftp_host, settings.ftp_port)
-        _ftp_server.serve_forever()
+        try:
+            _ftp_server.serve_forever()
+        except OSError:
+            pass  # raised by pyftpdlib kqueue on macOS when close_all() invalidates fds
 
     _ftp_thread = threading.Thread(target=_run, daemon=True, name="ftp-server")
     _ftp_thread.start()

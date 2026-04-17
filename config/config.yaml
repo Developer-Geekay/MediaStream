@@ -5,7 +5,24 @@ app:
   token_expire_minutes: 1440
 
 media:
+  # root_path is used only when no mappings are defined (legacy fallback).
   root_path: "./media"
+
+  # Folder mappings — add any number of entries.
+  # Each mapping appears as a top-level folder in the web UI, DLNA, FTP, and SMB.
+  # Paths can be absolute or relative to the working directory.
+  # Files are never copied; the originals are served in place.
+  #
+  # Example:
+  #   mappings:
+  #     - name: "Movies"
+  #       path: "/Volumes/NAS/Movies"
+  #     - name: "Music"
+  #       path: "/home/user/Music"
+  #     - name: "Photos"
+  #       path: "/home/user/Pictures"
+  mappings: []
+
   allowed_extensions:
     - .mp4
     - .mkv

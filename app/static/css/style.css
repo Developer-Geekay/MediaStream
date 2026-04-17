@@ -107,6 +107,11 @@ button { cursor: pointer; border: none; border-radius: 6px; font-size: 13px; fon
 .modal-card h3 { margin-bottom: 20px; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
 
+/* ---------- Player ---------- */
+.player-card { max-width: 900px; width: 95%; padding: 16px 20px; }
+.player-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; gap: 12px; }
+.player-title { font-size: 13px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ---------- Code block ---------- */
 .code-block { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 16px; font-size: 12px; font-family: monospace; overflow-x: auto; white-space: pre; max-height: 400px; overflow-y: auto; margin-bottom: 16px; }
 
@@ -124,3 +129,26 @@ h2 { font-size: 20px; margin-bottom: 20px; }
 .tab.active { display: block; }
 .screen { }
 .screen.hidden { display: none; }
+
+/* ---------- Mapping Bar ---------- */
+.mapping-bar { display: flex; align-items: center; gap: 12px; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 14px; flex-wrap: wrap; }
+.mapping-bar-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .5px; white-space: nowrap; }
+.mapping-chips { display: flex; gap: 8px; flex-wrap: wrap; flex: 1; align-items: center; }
+.mapping-empty { font-size: 12px; color: var(--text-muted); font-style: italic; }
+.mapping-chip { display: inline-flex; align-items: center; gap: 4px; background: var(--bg3); border: 1px solid var(--border); border-radius: 20px; padding: 4px 8px 4px 12px; font-size: 12px; cursor: pointer; transition: border-color .15s; }
+.mapping-chip:hover { border-color: var(--accent); color: var(--accent); }
+.mapping-chip.missing { border-color: var(--danger); color: var(--danger); }
+.mapping-chip-remove { background: none; border: none; color: var(--text-muted); font-size: 15px; padding: 0 2px; line-height: 1; cursor: pointer; }
+.mapping-chip-remove:hover { color: var(--danger); }
+
+/* ---------- Folder Picker ---------- */
+.folder-picker-modal { max-width: 580px; }
+.path-row { display: flex; gap: 8px; align-items: center; }
+.path-row input { flex: 1; font-family: monospace; font-size: 12px; }
+.fs-browser { border: 1px solid var(--border); border-radius: 6px; background: var(--bg3); max-height: 220px; overflow-y: auto; }
+.fs-browser-path { padding: 7px 12px; font-size: 11px; font-family: monospace; color: var(--text-muted); background: var(--bg); border-bottom: 1px solid var(--border); word-break: break-all; }
+.fs-dir-item { padding: 8px 14px; cursor: pointer; font-size: 13px; border-bottom: 1px solid var(--border); transition: background .1s; }
+.fs-dir-item:last-child { border-bottom: none; }
+.fs-dir-item:hover { background: var(--bg2); color: var(--accent); }
+.fs-parent { color: var(--text-muted); }
+.fs-empty { padding: 12px 14px; color: var(--text-muted); font-size: 12px; font-style: italic; }

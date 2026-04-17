@@ -38,7 +38,7 @@ media:
     - .gif
 
 ftp:
-  enabled: true
+  enabled: false   # start manually from the web UI when needed
   host: "0.0.0.0"
   port: 2121
   passive_ports_start: 60000
@@ -50,7 +50,7 @@ ftp:
   max_connections_per_ip: 5
 
 smb:
-  enabled: true
+  enabled: false   # start manually from the web UI when needed
   host: "0.0.0.0"
   # Port 4450 avoids conflicts with the OS built-in SMB (445).
   # Windows: Map Network Drive using \\<ip>:4450\MEDIAFILES

@@ -19,7 +19,17 @@ async function api(method, path, body, isForm) {
   const res = await fetch('/api' + path, opts);
   if (res.status === 401) { logout(); return null; }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+  if (!res.ok) {
+    // FastAPI validation errors return detail as an array of {loc, msg, type} objects
+    // Service errors may return {success: false, error: "..."} with HTTP 500
+    const d = data.detail;
+    let msg;
+    if (!d) msg = data.error || `HTTP ${res.status}`;
+    else if (typeof d === 'string') msg = d;
+    else if (Array.isArray(d)) msg = d.map(e => e.msg || JSON.stringify(e)).join('; ');
+    else msg = JSON.stringify(d);
+    throw new Error(msg);
+  }
   return data;
 }
 
@@ -137,8 +147,13 @@ function renderServiceCard(name, info) {
 
 async function startService(name) {
   try {
-    await api('POST', `/shares/${name}/start`);
-    toast(`${name.toUpperCase()} started`, 'success');
+    const res = await api('POST', `/shares/${name}/start`);
+    // Backend may return {success: false, error: "..."} even on 200 (e.g. FTP)
+    if (res && res.success === false) {
+      toast(res.error || `${name.toUpperCase()} failed to start`, 'error');
+    } else {
+      toast(`${name.toUpperCase()} started`, 'success');
+    }
     loadDashboard();
   } catch (e) { toast(e.message, 'error'); }
 }

@@ -450,6 +450,7 @@ class DLNAHTTPHandler(BaseHTTPRequestHandler):
         # Use the same flags as declared in protocolInfo (keeps ContentFeatures in sync)
         content_features = _DLNA_FLAGS
 
+        ua = self.headers.get("User-Agent", "")
         if range_header:
             start, end = self._parse_range(range_header, file_size)
             logger.info(
@@ -457,6 +458,42 @@ class DLNAHTTPHandler(BaseHTTPRequestHandler):
                 tag, file_path.name, range_header, start, end, file_size,
                 (end - start + 1) / 1_048_576,
             )
+        elif "UnityPlayer" in ua and not range_header:
+            # BigScreen's Unity engine (UnityWebRequest) downloads entire files for
+            # thumbnail/metadata extraction. Cap at 4 MB — enough for format detection
+            # and first-frame thumbnail; prevents multi-GB downloads that block the UI.
+            # IMPORTANT: Send 200 OK (not 206) with Content-Length = 4MB and NO Content-Range.
+            # libcurl sees "received 4MB, Content-Length=4MB" → marks download as complete.
+            # BigScreen then marks the file as playable and libmpv launches for actual streaming.
+            # If we send 206 + Content-Range: 0-4MB/2GB, libcurl sees incomplete transfer →
+            # BigScreen never enables playback.
+            thumb_size = min(file_size, 4 * 1024 * 1024)
+            logger.info(
+                "DLNA THUMB      [%s]  %s  BigScreen thumbnail → 200 OK  %d bytes (file=%.1f MB)",
+                tag, file_path.name, thumb_size, file_size / 1_048_576,
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(thumb_size))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("transferMode.dlna.org", "Streaming")
+            self.send_header("ContentFeatures.dlna.org", content_features)
+            self.end_headers()
+            sent = 0
+            try:
+                with open(file_path, "rb") as f:
+                    remaining = thumb_size
+                    while remaining > 0:
+                        chunk = f.read(min(CHUNK_SIZE, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        sent += len(chunk)
+                        remaining -= len(chunk)
+                logger.debug("DLNA THUMB OK   [%s]  %s  sent=%d", tag, file_path.name, sent)
+            except (BrokenPipeError, ConnectionResetError):
+                logger.debug("DLNA THUMB END  [%s]  %s  disconnected after %d bytes", tag, file_path.name, sent)
+            return
         else:
             # Always respond with 206 even for full-file requests.
             # BigScreen VR and some TVs only accept 206; a plain 200 causes silent failure.

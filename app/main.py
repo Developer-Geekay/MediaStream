@@ -1,4 +1,5 @@
 import logging
+import logging.handlers
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,11 +17,47 @@ from app.services import ftp as ftp_service
 from app.services import smb as smb_service
 from app.services import dlna as dlna_service
 
+# ── Console logging ───────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("mediastream")
+
+# ── File logging ──────────────────────────────────────────────────────────────
+# Set up rotating file handlers immediately so every log line (including
+# startup) lands in the log files, not just the console.
+_LOGS_DIR = Path("./logs")
+_LOGS_DIR.mkdir(exist_ok=True)
+
+_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+# app.log — all INFO+ messages, rotated at 10 MB, 7 backups kept
+_app_handler = logging.handlers.RotatingFileHandler(
+    _LOGS_DIR / "app.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=7,
+    encoding="utf-8",
+)
+_app_handler.setLevel(logging.DEBUG)
+_app_handler.setFormatter(_fmt)
+
+# error.log — ERROR+ only, for quick diagnostics
+_err_handler = logging.handlers.RotatingFileHandler(
+    _LOGS_DIR / "error.log",
+    maxBytes=5 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
+)
+_err_handler.setLevel(logging.ERROR)
+_err_handler.setFormatter(_fmt)
+
+# Attach both handlers to the root logger so every named logger writes to files
+_root = logging.getLogger()
+_root.addHandler(_app_handler)
+_root.addHandler(_err_handler)
+
+logger.info("File logging initialised → %s/{app,error}.log", _LOGS_DIR.resolve())
 
 
 def _bootstrap_admin():
@@ -44,6 +81,8 @@ def _ensure_dirs():
         (Path(settings.media_root) / sub).mkdir(parents=True, exist_ok=True)
     Path("./certs").mkdir(exist_ok=True)
     Path("./config").mkdir(exist_ok=True)
+    Path("./logs").mkdir(exist_ok=True)
+    logger.debug("DIRS            Ensured: certs/, config/, logs/, media/")
 
 
 @asynccontextmanager

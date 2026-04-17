@@ -1,0 +1,20 @@
+=== MediaStream Setup ===
+Platform: Darwin
+Python dependencies installed.
+
+=== Setup complete! ===
+
+To start MediaStream:
+  source .venv/bin/activate
+  python run.py
+
+Web UI:  http://192.168.3.202:8080
+FTP:     ftp://192.168.3.202:2121  (FTPS/TLS)
+SMB:     smb://192.168.3.202:4450/MEDIAFILES
+DLNA:    http://192.168.3.202:8200/dlna/description.xml  (auto-discovered)
+
+Default login: admin / admin1234  <<< CHANGE THIS IMMEDIATELY
+
+Note: SMB port 4450 is used to avoid conflicts with the OS built-in SMB (445).
+      On macOS connect via: Finder → Go → Connect to Server → smb://192.168.3.202:4450
+      SSDP/DLNA discovery on port 1900 may require sudo on Linux/macOS.

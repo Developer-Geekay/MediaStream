@@ -58,7 +58,10 @@ async def browse(path: str = "", _: User = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Path not found")
     if not target.is_dir():
         raise HTTPException(status_code=400, detail="Not a directory")
-    items = sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+    items = sorted(
+        (p for p in target.iterdir() if not p.name.startswith(".")),
+        key=lambda p: (p.is_file(), p.name.lower()),
+    )
     return {
         "path": path,
         "items": [_file_info(p) for p in items],
@@ -121,7 +124,7 @@ async def media_stats(_: User = Depends(get_current_user)):
     total_files = 0
     by_type: dict[str, int] = {}
     for f in MEDIA_ROOT.rglob("*"):
-        if f.is_file():
+        if f.is_file() and not f.name.startswith("."):
             total_files += 1
             total_size += f.stat().st_size
             ext = f.suffix.lower()

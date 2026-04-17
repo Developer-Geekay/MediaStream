@@ -56,39 +56,53 @@ def get_platform() -> str:
     return "linux"
 
 
+def _bundled_smbd_dir() -> Path:
+    """Return the resources/smbd/<platform>-<arch>/ directory for this machine."""
+    import platform as _pl
+    machine = _pl.machine().lower()
+    arch = "arm64" if machine in ("arm64", "aarch64") else "x86_64"
+    plat = "macos" if sys.platform == "darwin" else "linux"
+    return _PROJECT_ROOT / "resources" / "smbd" / f"{plat}-{arch}"
+
+
 def _find_smbd() -> str | None:
     """
-    Return the path to Samba's smbd binary, or None if not installed.
+    Locate Samba's smbd binary. Priority:
+      1. Bundled binary in resources/smbd/<platform>-<arch>/smbd
+         (placed there by scripts/download_smbd.py — no system install needed)
+      2. Homebrew prefix on macOS  (/opt/homebrew/sbin or /usr/local/sbin)
+      3. System PATH on Linux
 
-    IMPORTANT — macOS caveat:
-      /usr/sbin/smbd is Apple's own SMB daemon (part of macOS), NOT Samba.
-      It does not accept Samba CLI flags (--foreground, --configfile, etc.)
-      and exits immediately with code 0 when invoked directly.
-      We skip /usr/sbin entirely on macOS and look only in Homebrew paths.
+    IMPORTANT: On macOS, /usr/sbin/smbd is Apple's own daemon — NOT Samba.
+    It ignores all Samba CLI flags and exits immediately with code 0.
+    We explicitly skip that path on macOS.
     """
+    # ── 1. Bundled binary (preferred) ────────────────────────────────────────
+    bundled = _bundled_smbd_dir() / "smbd"
+    if bundled.is_file() and os.access(bundled, os.X_OK):
+        logger.debug("SMB CHECK       Using bundled smbd: %s", bundled)
+        return str(bundled)
+
+    # ── 2. Homebrew on macOS ──────────────────────────────────────────────────
     if sys.platform == "darwin":
-        candidates = [
-            "/opt/homebrew/sbin/smbd",   # Homebrew on Apple Silicon (M1/M2/M3/M4)
-            "/usr/local/sbin/smbd",       # Homebrew on Intel Mac
-        ]
-        for p in candidates:
+        for p in ("/opt/homebrew/sbin/smbd", "/usr/local/sbin/smbd"):
             if Path(p).is_file() and os.access(p, os.X_OK):
                 logger.debug("SMB CHECK       Found Homebrew smbd: %s", p)
                 return p
         logger.debug(
-            "SMB CHECK       Homebrew smbd not found "
-            "(skipped /usr/sbin/smbd — that is Apple's daemon, not Samba)"
+            "SMB CHECK       Bundled and Homebrew smbd not found. "
+            "Run: python scripts/download_smbd.py"
         )
-        return None   # Apple's /usr/sbin/smbd is NOT Samba
+        return None   # /usr/sbin/smbd is Apple's daemon — never use it
 
-    # Linux / other — use PATH
+    # ── 3. System PATH on Linux ───────────────────────────────────────────────
     path = shutil.which("smbd")
     logger.debug("SMB CHECK       smbd via PATH: %s", path or "not found")
     return path
 
 
 def check_samba_installed() -> bool:
-    """Return True if Samba's smbd is available (not Apple's built-in)."""
+    """Return True if a usable Samba smbd is available (bundled or system)."""
     return _find_smbd() is not None
 
 
@@ -130,26 +144,39 @@ def check_backend() -> dict:
         }
 
     # Linux / macOS
-    installed = check_samba_installed()
-    smbd_path = _find_smbd() or "not found"
+    installed  = check_samba_installed()
+    smbd_path  = _find_smbd() or "not found"
+    bundled    = (_bundled_smbd_dir() / "smbd").exists()
+    source     = "bundled (resources/)" if bundled else ("Homebrew" if platform == "macos" else "system PATH")
+
     if platform == "macos":
-        install_note = "brew install samba   (then re-start MediaStream)"
+        install_note = (
+            "Run:  python scripts/download_smbd.py\n"
+            "This downloads and bundles smbd automatically (no system install needed).\n"
+            "Or install manually: brew install samba"
+        )
     else:
-        install_note = "apt install samba  OR  yum install samba  (then re-start MediaStream)"
+        install_note = (
+            "Run:  python scripts/download_smbd.py\n"
+            "This downloads and bundles smbd automatically (no system install needed).\n"
+            "Or install manually: apt install samba  /  yum install samba  /  dnf install samba"
+        )
 
     logger.info(
-        "SMB CHECK       smbd=%s  installed=%s  port=%d",
-        smbd_path, installed, settings.smb_port,
+        "SMB CHECK       smbd=%s  installed=%s  source=%s  port=%d",
+        smbd_path, installed, source, settings.smb_port,
     )
     return {
         "platform": platform,
         "backend": "samba",
         "installed": installed,
         "available": installed,
+        "bundled": bundled,
+        "smbd_source": source,
         "protocol": "SMB2/3",
         "port": settings.smb_port,
         "install_note": None if installed else install_note,
-        "install_script": str(_PROJECT_ROOT / "scripts" / f"install_samba_{platform}.sh"),
+        "install_script": str(_PROJECT_ROOT / "scripts" / "download_smbd.py"),
     }
 
 
@@ -159,29 +186,29 @@ def check_backend() -> dict:
 
 def install_samba() -> dict:
     """
-    Run the platform-appropriate install script.
-    Requires sudo on Linux/macOS, or the process to be elevated on Windows.
+    Bundle smbd into resources/ by running scripts/download_smbd.py.
+    On Windows: run the PowerShell enabler script instead.
     Called via POST /api/shares/smb/install after the user clicks 'Install'.
+    No sudo / admin rights required for the bundled-binary approach on Linux/macOS.
     """
     platform = get_platform()
     logger.info("SMB INSTALL     Requested on platform=%s", platform)
 
     if platform == "windows":
         script = _PROJECT_ROOT / "scripts" / "install_samba_windows.ps1"
-        cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(script)]
-    else:
-        script = _PROJECT_ROOT / "scripts" / f"install_samba_{platform}.sh"
         if not script.exists():
             msg = f"Install script not found: {script}"
             logger.error("SMB INSTALL     %s", msg)
             return {"success": False, "error": msg}
-        script.chmod(0o755)
-        cmd = ["bash", str(script)]
-
-    if not script.exists():
-        msg = f"Install script not found: {script}"
-        logger.error("SMB INSTALL     %s", msg)
-        return {"success": False, "error": msg}
+        cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+    else:
+        # Use the Python download/bundle script — no package manager or sudo needed
+        script = _PROJECT_ROOT / "scripts" / "download_smbd.py"
+        if not script.exists():
+            msg = f"Download script not found: {script}"
+            logger.error("SMB INSTALL     %s", msg)
+            return {"success": False, "error": msg}
+        cmd = [sys.executable, str(script)]
 
     logger.info("SMB INSTALL     Running: %s", " ".join(str(c) for c in cmd))
 
@@ -363,11 +390,26 @@ def _start_samba() -> dict:
     ]
     logger.info("SMB START       Launching: %s", " ".join(cmd))
 
+    # Build environment — point to bundled libs so the binary finds its dylibs
+    # without needing a system Samba installation.
+    env = os.environ.copy()
+    bundled_lib = _bundled_smbd_dir() / "lib"
+    if bundled_lib.is_dir():
+        if sys.platform == "darwin":
+            existing = env.get("DYLD_LIBRARY_PATH", "")
+            env["DYLD_LIBRARY_PATH"] = f"{bundled_lib}:{existing}".rstrip(":")
+            logger.debug("SMB START       DYLD_LIBRARY_PATH=%s", env["DYLD_LIBRARY_PATH"])
+        else:
+            existing = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = f"{bundled_lib}:{existing}".rstrip(":")
+            logger.debug("SMB START       LD_LIBRARY_PATH=%s", env["LD_LIBRARY_PATH"])
+
     try:
         _smbd_proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=env,
         )
         # Short delay to catch instant crash
         time.sleep(0.8)

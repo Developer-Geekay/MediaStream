@@ -33,6 +33,17 @@ async function api(method, path, body, isForm) {
   return data;
 }
 
+// ---- Mobile sidebar ----
+const _sidebar  = document.getElementById('sidebar');
+const _overlay  = document.getElementById('sidebar-overlay');
+const _toggleBtn = document.getElementById('sidebar-toggle');
+
+function openSidebar()  { _sidebar.classList.add('open');  _overlay.classList.add('open'); }
+function closeSidebar() { _sidebar.classList.remove('open'); _overlay.classList.remove('open'); }
+
+if (_toggleBtn)  _toggleBtn.addEventListener('click', openSidebar);
+if (_overlay)    _overlay.addEventListener('click', closeSidebar);
+
 // ---- Auth ----
 document.getElementById('login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -78,6 +89,9 @@ async function initApp() {
   const roleBadge = document.getElementById('nav-role');
   roleBadge.textContent = currentUser.role;
   roleBadge.className = `badge badge-${currentUser.role}`;
+  // Avatar initials
+  const av = document.getElementById('user-avatar');
+  if (av) av.textContent = currentUser.username.slice(0, 2).toUpperCase();
 
   // Show/hide admin-only elements
   document.querySelectorAll('.admin-only').forEach(el => {
@@ -105,6 +119,7 @@ function switchTab(name) {
   if (link) link.classList.add('active');
   const tab = document.getElementById(`tab-${name}`);
   if (tab) tab.classList.add('active');
+  closeSidebar();
   if (name === 'dashboard') loadDashboard();
   if (name === 'media') { loadMappings(); loadMedia(''); }
   if (name === 'users') loadUsers();
@@ -114,34 +129,123 @@ function switchTab(name) {
 // ---- Dashboard ----
 async function loadDashboard() {
   try {
-    const [stats, status] = await Promise.all([
-      api('GET', '/media/stats'),
-      api('GET', '/shares/status'),
-    ]);
+    const isAdmin = currentUser && currentUser.role === 'admin';
+    const fetches = [api('GET', '/media/stats'), api('GET', '/shares/status')];
+    // Only fetch SMB check info for admins (endpoint requires admin auth)
+    if (isAdmin) fetches.push(api('GET', '/shares/smb/check').catch(() => null));
+
+    const [stats, status, smbCheck] = await Promise.all(fetches);
+
     if (stats) {
       document.getElementById('stat-total-files').textContent = stats.total_files;
       document.getElementById('stat-total-size').textContent = fmtBytes(stats.total_size_bytes);
     }
     if (status) {
-      renderServiceCard('ftp', status.ftp);
-      renderServiceCard('smb', status.smb);
+      renderServiceCard('ftp',  status.ftp);
+      renderServiceCard('smb',  status.smb,  smbCheck || null);
       renderServiceCard('dlna', status.dlna);
     }
   } catch (e) { console.error(e); }
 }
 
-function renderServiceCard(name, info) {
-  const badge = document.getElementById(`${name}-badge`);
+function renderServiceCard(name, info, checkInfo) {
+  const badge  = document.getElementById(`${name}-badge`);
   const detail = document.getElementById(`${name}-detail`);
+  const card   = document.getElementById(`card-${name}`);
   const running = !!info.running;
+
   badge.textContent = running ? 'ON' : 'OFF';
-  badge.className = `badge ${running ? 'badge-on' : 'badge-off'}`;
+  badge.className   = `badge ${running ? 'badge-on pulse' : 'badge-off'}`;
+  if (card) card.classList.toggle('is-running', running);
+
   if (name === 'ftp') {
-    detail.textContent = `Port ${info.port || ''} | TLS: ${info.tls ? 'yes' : 'no'}`;
-  } else if (name === 'smb') {
-    detail.textContent = `Port ${info.port || ''} | Share: ${info.share_name || ''}`;
+    detail.textContent = `Port ${info.port || '—'} · TLS ${info.tls ? 'on' : 'off'}`;
   } else if (name === 'dlna') {
-    detail.textContent = `${info.friendly_name || ''} | Port ${info.http_port || ''}`;
+    detail.textContent = `${info.friendly_name || 'DLNA'} · Port ${info.http_port || '—'}`;
+  } else if (name === 'smb') {
+    _renderSmbCard(info, checkInfo);
+  }
+}
+
+function _renderSmbCard(info, checkInfo) {
+  const detail      = document.getElementById('smb-detail');
+  const note        = document.getElementById('smb-install-note');
+  const actionsDiv  = document.getElementById('smb-actions');
+  if (!actionsDiv) return;
+
+  const needsInstall = checkInfo && checkInfo.needs_install;
+  const isAdmin      = currentUser && currentUser.role === 'admin';
+
+  // Detail line
+  if (needsInstall) {
+    detail.textContent = `${checkInfo.platform || 'unknown'} · Samba not installed`;
+  } else {
+    const proto = info.protocol || 'SMB2/3';
+    detail.textContent = `Port ${info.port || '—'} · ${proto} · \\\\…\\${info.share_name || ''}`;
+  }
+
+  // Install note box
+  if (needsInstall && checkInfo.install_note) {
+    note.textContent = checkInfo.install_note;
+    note.classList.remove('hidden');
+  } else {
+    note.classList.add('hidden');
+  }
+
+  // Rebuild action buttons
+  if (!isAdmin) { actionsDiv.innerHTML = ''; return; }
+
+  actionsDiv.innerHTML = '';
+
+  if (needsInstall) {
+    // Show Install button — no Start/Stop until smbd is present
+    const btn = document.createElement('button');
+    btn.id        = 'smb-install-btn';
+    btn.className = 'btn-primary btn-sm';
+    btn.textContent = 'Install smbd';
+    btn.addEventListener('click', installSmb);
+    actionsDiv.appendChild(btn);
+  } else {
+    // Normal Start / Stop / Reload buttons
+    const start = document.createElement('button');
+    start.className = 'btn-primary btn-sm';
+    start.textContent = 'Start';
+    start.addEventListener('click', () => startService('smb'));
+
+    const stop = document.createElement('button');
+    stop.className = 'btn-danger btn-sm';
+    stop.textContent = 'Stop';
+    stop.addEventListener('click', () => stopService('smb'));
+
+    const reload = document.createElement('button');
+    reload.className = 'btn-secondary btn-sm';
+    reload.textContent = 'Reload';
+    reload.addEventListener('click', reloadSmb);
+
+    actionsDiv.appendChild(start);
+    actionsDiv.appendChild(stop);
+    actionsDiv.appendChild(reload);
+  }
+}
+
+async function installSmb() {
+  const btn = document.getElementById('smb-install-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner" style="width:12px;height:12px;border-width:2px"></span> Installing…';
+  }
+  toast('Downloading and bundling smbd — this may take a few minutes…', 'warn');
+  try {
+    const res = await api('POST', '/shares/smb/install');
+    if (res && res.success === false) {
+      toast(res.error || 'Install failed', 'error');
+    } else {
+      toast('smbd installed — you can now start the SMB server', 'success');
+    }
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    loadDashboard();
   }
 }
 
@@ -192,37 +296,87 @@ async function loadMedia(path) {
   currentPath = path;
   const list = document.getElementById('media-list');
   const crumb = document.getElementById('breadcrumb');
-  list.innerHTML = '<p style="color:var(--text-muted)">Loading...</p>';
+  list.innerHTML = '<div class="empty-state"><span class="spinner"></span></div>';
 
-  // Breadcrumb
+  // Breadcrumb — built with DOM to avoid XSS
+  crumb.textContent = '';
+  const homeA = document.createElement('a');
+  homeA.textContent = 'Home';
+  homeA.addEventListener('click', () => loadMedia(''));
+  crumb.appendChild(homeA);
   const parts = path.split('/').filter(Boolean);
-  let html = '<a onclick="loadMedia(\'\')">Home</a>';
   let built = '';
-  parts.forEach(p => { built += (built ? '/' : '') + p; const b = built; html += ` / <a onclick="loadMedia('${b}')">${p}</a>`; });
-  crumb.innerHTML = html;
+  parts.forEach(p => {
+    built += (built ? '/' : '') + p;
+    const sep = document.createElement('span');
+    sep.className = 'breadcrumb-sep';
+    sep.textContent = '/';
+    crumb.appendChild(sep);
+    const a = document.createElement('a');
+    a.textContent = p;
+    const snap = built;
+    a.addEventListener('click', () => loadMedia(snap));
+    crumb.appendChild(a);
+  });
 
   try {
     const data = await api('GET', `/media/browse?path=${encodeURIComponent(path)}`);
     if (!data) return;
     list.innerHTML = '';
 
-    if (path && (!data.items || data.items.length === 0)) {
-      list.innerHTML = '<p style="color:var(--text-muted);grid-column:1/-1">Empty folder</p>';
+    const items = data.items || [];
+    if (!items.length) {
+      const em = document.createElement('div');
+      em.className = 'empty-state';
+      em.innerHTML = '<span class="empty-state-icon">📂</span>Empty folder';
+      list.appendChild(em);
     }
 
-    (data.items || []).forEach(item => {
+    items.forEach(item => {
       const div = document.createElement('div');
       div.className = 'media-item';
-      div.innerHTML = `
-        <div class="media-icon">${mimeIcon(item)}</div>
-        <div class="media-name">${esc(item.name)}</div>
-        <div class="media-size">${item.type === 'directory' ? 'Folder' : fmtBytes(item.size)}</div>
-        <div class="media-actions">
-          ${item.type !== 'directory' ? `<button class="btn-ghost btn-sm" onclick="streamFile('${esc(item.path)}','${esc(item.mime)}')">▶</button>` : ''}
-          ${currentUser && currentUser.role === 'admin' ? `<button class="btn-ghost btn-sm" style="color:var(--danger)" onclick="deleteItem('${esc(item.path)}')">✕</button>` : ''}
-        </div>`;
+
+      const iconWrap = document.createElement('div');
+      iconWrap.className = 'media-icon-wrap';
+      iconWrap.textContent = mimeIcon(item);
+
+      const nameEl = document.createElement('div');
+      nameEl.className = 'media-name';
+      nameEl.textContent = item.name;
+
+      const sizeEl = document.createElement('div');
+      sizeEl.className = 'media-size';
+      sizeEl.textContent = item.type === 'directory' ? 'Folder' : fmtBytes(item.size);
+
+      const actions = document.createElement('div');
+      actions.className = 'media-actions';
+
+      if (item.type !== 'directory') {
+        const playBtn = document.createElement('button');
+        playBtn.className = 'btn-ghost btn-sm';
+        playBtn.title = 'Play';
+        playBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><polygon points="2,1 11,6 2,11" fill="currentColor"/></svg>';
+        playBtn.addEventListener('click', (e) => { e.stopPropagation(); streamFile(item.path, item.mime); });
+        actions.appendChild(playBtn);
+      }
+
+      if (currentUser && currentUser.role === 'admin') {
+        const delBtn = document.createElement('button');
+        delBtn.className = 'btn-ghost btn-sm';
+        delBtn.title = 'Delete';
+        delBtn.style.color = 'var(--danger)';
+        delBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 11 11" fill="none"><path d="M1 1l9 9M10 1L1 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+        delBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteItem(item.path); });
+        actions.appendChild(delBtn);
+      }
+
+      div.appendChild(iconWrap);
+      div.appendChild(nameEl);
+      div.appendChild(sizeEl);
+      div.appendChild(actions);
+
       if (item.type === 'directory') {
-        div.addEventListener('click', (e) => { if (e.target.tagName !== 'BUTTON') loadMedia(item.path); });
+        div.addEventListener('click', (e) => { if (e.target.tagName !== 'BUTTON' && !e.target.closest('button')) loadMedia(item.path); });
       }
       list.appendChild(div);
     });
@@ -456,9 +610,9 @@ async function loadUsers() {
       tr.innerHTML = `
         <td><strong>${esc(u.username)}</strong></td>
         <td><span class="badge badge-${u.role}">${u.role}</span></td>
-        <td>${u.ftp_access ? '✓' : '—'}</td>
-        <td>${u.smb_access ? '✓' : '—'}</td>
-        <td>${u.dlna_access ? '✓' : '—'}</td>
+        <td><span class="${u.ftp_access  ? 'access-yes' : 'access-no'}">${u.ftp_access  ? '✓' : '—'}</span></td>
+        <td><span class="${u.smb_access  ? 'access-yes' : 'access-no'}">${u.smb_access  ? '✓' : '—'}</span></td>
+        <td><span class="${u.dlna_access ? 'access-yes' : 'access-no'}">${u.dlna_access ? '✓' : '—'}</span></td>
         <td><span class="badge ${u.disabled ? 'badge-off' : 'badge-on'}">${u.disabled ? 'Disabled' : 'Active'}</span></td>
         <td>
           <button class="btn-ghost btn-sm" onclick="toggleUser('${u.username}', ${u.disabled})">${u.disabled ? 'Enable' : 'Disable'}</button>
@@ -523,9 +677,9 @@ async function loadConnections() {
         detail: `Port ${status.ftp.port} | TLS: ${status.ftp.tls ? 'enabled' : 'disabled'}`,
       },
       {
-        name: 'SMB (Pure Python)', key: 'smb', icon: '💾',
+        name: `SMB (${status.smb.protocol || 'SMB2/3'})`, key: 'smb', icon: '💾',
         hint: status.smb.connect_hint || '',
-        detail: `Port ${status.smb.port} | Share: ${status.smb.share_name}`,
+        detail: `Port ${status.smb.port} · Share: ${status.smb.share_name} · ${status.smb.platform || ''}`,
       },
       {
         name: 'DLNA / UPnP', key: 'dlna', icon: '📺',
